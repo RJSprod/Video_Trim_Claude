@@ -1,0 +1,6 @@
+# UI, playback and audio.
+PySide6>=6.6
+
+# Supplies a bundled ffmpeg binary so A-B clip export works without a separate
+# install. If you already have ffmpeg on PATH this is optional.
+imageio-ffmpeg>=0.4.9

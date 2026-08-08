@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# A locally-dropped ffmpeg binary is picked up automatically; don't commit it.
+ffmpeg/
+ffmpeg.exe
+
+# Scratch media used while testing.
+samples/
