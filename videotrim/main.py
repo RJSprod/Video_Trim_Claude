@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         controls.playPauseRequested.connect(self.player.toggle)
         controls.stopRequested.connect(self.player.stop)
         controls.skipRequested.connect(self.player.skip)
+        controls.stepRequested.connect(self.player.step_frames)
         controls.repeatToggled.connect(self.player.set_repeat)
         controls.markerCycled.connect(self.cycle_marker)
         controls.saveClipRequested.connect(self.save_clip)
@@ -160,8 +161,14 @@ class MainWindow(QMainWindow):
                 return
             return super().keyPressEvent(event)
 
+        shift = event.modifiers() & Qt.ShiftModifier
+
         if key == Qt.Key_Space:
             self.player.toggle()
+        elif key in (Qt.Key_Comma, Qt.Key_Less) or (key == Qt.Key_Left and shift):
+            self.player.step_frames(-1)
+        elif key in (Qt.Key_Period, Qt.Key_Greater) or (key == Qt.Key_Right and shift):
+            self.player.step_frames(1)
         elif key == Qt.Key_Left:
             self.player.skip(-5000)
             self.canvas.flash("left", "rewind", "5s")

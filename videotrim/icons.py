@@ -34,6 +34,25 @@ def _stop():
     return path
 
 
+def _step(back):
+    """Triangle nudged against a bar -- the usual single-frame step mark."""
+    path = QPainterPath()
+    tri = QPainterPath()
+    if back:
+        tri.moveTo(80, 18)
+        tri.lineTo(80, 82)
+        tri.lineTo(36, 50)
+        path.addRoundedRect(QRectF(18, 18, 12, 64), 5, 5)
+    else:
+        tri.moveTo(20, 18)
+        tri.lineTo(20, 82)
+        tri.lineTo(64, 50)
+        path.addRoundedRect(QRectF(70, 18, 12, 64), 5, 5)
+    tri.closeSubpath()
+    path.addPath(tri)
+    return path
+
+
 def _chevrons(back):
     """Double chevron used by the 5-second skip buttons."""
     path = QPainterPath()
@@ -178,6 +197,8 @@ _GLYPHS = {
     "stop": _stop,
     "rewind": lambda: _chevrons(True),
     "forward": lambda: _chevrons(False),
+    "step_back": lambda: _step(True),
+    "step_forward": lambda: _step(False),
     "repeat": _repeat,
     "camera": _camera,
     "save": _save_clip,

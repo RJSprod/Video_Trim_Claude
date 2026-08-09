@@ -32,8 +32,9 @@ BTN_SIZE = 44  # touch friendly hit target
 BTN_SIZE_PRIMARY = 54
 SCRUB_HEIGHT = 34
 
-# Windows that get narrower than this start clipping the control row.
-MIN_WINDOW = (660, 430)
+# Windows narrower than this start clipping the control row. The bar needs
+# ~710px for its buttons and labels, plus the panel margin on both sides.
+MIN_WINDOW = (780, 470)
 
 
 def fmt_time(ms, tenths=False):

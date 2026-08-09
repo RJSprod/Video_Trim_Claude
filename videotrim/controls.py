@@ -29,6 +29,7 @@ class ControlBar(QWidget):
     playPauseRequested = Signal()
     stopRequested = Signal()
     skipRequested = Signal(int)
+    stepRequested = Signal(int)
     repeatToggled = Signal(bool)
     markerCycled = Signal()
     saveClipRequested = Signal()
@@ -44,7 +45,9 @@ class ControlBar(QWidget):
 
         self.btn_stop = GlassButton("stop", "Stop — back to the start of the loop", self)
         self.btn_rew = GlassButton("rewind", "Back 5 seconds  (←)", self, badge="5")
+        self.btn_step_back = GlassButton("step_back", "Previous frame  (,)", self)
         self.btn_play = GlassButton("play", "Play  (Space)", self, primary=True)
+        self.btn_step_fwd = GlassButton("step_forward", "Next frame  (.)", self)
         self.btn_fwd = GlassButton("forward", "Forward 5 seconds  (→)", self, badge="5")
         self.btn_repeat = GlassButton("repeat", "Repeat  (R)", self)
         self.btn_repeat.setCheckable(True)
@@ -76,7 +79,16 @@ class ControlBar(QWidget):
         row.addWidget(time_box, 0, Qt.AlignVCenter)
 
         row.addStretch(1)
-        for button in (self.btn_stop, self.btn_rew, self.btn_play, self.btn_fwd, self.btn_repeat):
+        centre = (
+            self.btn_stop,
+            self.btn_rew,
+            self.btn_step_back,
+            self.btn_play,
+            self.btn_step_fwd,
+            self.btn_fwd,
+            self.btn_repeat,
+        )
+        for button in centre:
             row.addWidget(button, 0, Qt.AlignVCenter)
         row.addStretch(1)
 
@@ -94,6 +106,8 @@ class ControlBar(QWidget):
         self.btn_stop.clicked.connect(self.stopRequested)
         self.btn_rew.clicked.connect(lambda: self.skipRequested.emit(-5000))
         self.btn_fwd.clicked.connect(lambda: self.skipRequested.emit(5000))
+        self.btn_step_back.clicked.connect(lambda: self.stepRequested.emit(-1))
+        self.btn_step_fwd.clicked.connect(lambda: self.stepRequested.emit(1))
         self.btn_repeat.toggled.connect(self.repeatToggled)
         self.btn_ab.clicked.connect(self.markerCycled)
         self.btn_clip.clicked.connect(self.saveClipRequested)
@@ -148,7 +162,9 @@ class ControlBar(QWidget):
         for button in (
             self.btn_stop,
             self.btn_rew,
+            self.btn_step_back,
             self.btn_play,
+            self.btn_step_fwd,
             self.btn_fwd,
             self.btn_repeat,
             self.btn_ab,

@@ -9,7 +9,7 @@ The A-B rules, matching VLC:
 """
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 
 # Shortest span we accept between A and B. Anything tighter is a mis-tap.
 MIN_LOOP_MS = 120
@@ -19,6 +19,9 @@ MIN_LOOP_MS = 120
 SEEK_GUARD_MS = 260
 
 SKIP_MS = 5000
+
+# Used only when a file reports neither frame timings nor a frame rate.
+FALLBACK_FRAME_MS = 40.0
 
 
 class PlayerController(QObject):
@@ -48,12 +51,19 @@ class PlayerController(QObject):
         self._priming = False
         self._guard = 0
 
+        # Presentation timing of the frame currently on screen, so frame
+        # stepping can move relative to the real frame rather than to the
+        # player's coarser reported position.
+        self._frame_start_us = -1
+        self._frame_dur_us = 0
+
         # Polls the boundary while playing; positionChanged alone is too coarse
         # to land a tight loop cleanly.
         self._tick = QTimer(self)
         self._tick.setInterval(25)
         self._tick.timeout.connect(self._enforce_bounds)
 
+        self.sink.videoFrameChanged.connect(self._on_sink_frame)
         self._player.positionChanged.connect(self._on_position)
         self._player.durationChanged.connect(self._on_duration)
         self._player.playbackStateChanged.connect(self._on_state)
@@ -117,6 +127,8 @@ class PlayerController(QObject):
         self._player.stop()
         self._path = path
         self._priming = True
+        self._frame_start_us = -1
+        self._frame_dur_us = 0
         self._player.setSource(QUrl.fromLocalFile(path))
         self.sourceChanged.emit(path)
 
@@ -158,6 +170,44 @@ class PlayerController(QObject):
         """Seek from the UI. Clamped into the A-B range when one is set."""
         start, end = self.bounds()
         self._seek(max(start, min(int(ms), max(start, end - 20))))
+
+    @property
+    def frame_duration_ms(self):
+        """Length of one frame, measured from decoded frames where possible."""
+        if self._frame_dur_us > 0:
+            return self._frame_dur_us / 1000.0
+        rate = self._meta_frame_rate()
+        if rate > 0:
+            return 1000.0 / rate
+        return FALLBACK_FRAME_MS
+
+    def step_frames(self, direction):
+        """Move exactly one frame forward (+1) or back (-1), and pause."""
+        if not self.has_media:
+            return
+        if self.is_playing:
+            self._player.pause()
+
+        frame_us = self._frame_dur_us if self._frame_dur_us > 0 else int(self.frame_duration_ms * 1000)
+        if self._frame_start_us >= 0:
+            # Anchor on the displayed frame's own timestamp and land in the
+            # middle of the neighbouring frame, so rounding to whole
+            # milliseconds can never drop us back onto the frame we left.
+            target_us = self._frame_start_us + direction * frame_us + frame_us // 2
+            target_ms = target_us / 1000.0
+        else:
+            target_ms = self.position + direction * (frame_us / 1000.0)
+
+        start, end = self.bounds()
+        self._seek(int(round(max(start, min(target_ms, max(start, end - 1))))))
+
+    def _meta_frame_rate(self):
+        try:
+            key = getattr(QMediaMetaData.Key, "VideoFrameRate", None) or QMediaMetaData.VideoFrameRate
+            value = self._player.metaData().value(key)
+            return float(value) if value else 0.0
+        except Exception:
+            return 0.0
 
     def _seek(self, ms):
         self._guard = SEEK_GUARD_MS
@@ -217,6 +267,15 @@ class PlayerController(QObject):
             self.markersChanged.emit(None, None)
 
     # --- internals -----------------------------------------------------------
+    def _on_sink_frame(self, frame):
+        if frame is None or not frame.isValid():
+            return
+        start, end = frame.startTime(), frame.endTime()
+        if start >= 0:
+            self._frame_start_us = start
+            if end > start:
+                self._frame_dur_us = end - start
+
     def _on_position(self, pos):
         self.positionChanged.emit(max(0, int(pos)))
 

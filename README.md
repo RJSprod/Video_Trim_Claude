@@ -43,7 +43,9 @@ The bar along the bottom, left to right:
 | Time | Current position (to a tenth) / total, plus the A-B range underneath. |
 | ■ Stop | Pause and jump back to the start — marker A if a loop is set, otherwise 0:00. |
 | « 5 | Back 5 seconds. |
+| ▐◀ | Previous frame. Pauses first, then steps exactly one frame. |
 | ▶ / ❚❚ | Play / pause. |
+| ▶▌ | Next frame. |
 | » 5 | Forward 5 seconds. |
 | ⟳ Repeat | Loop the A-B range, or the whole file when no range is set. |
 | **A-B** | Cycles the loop markers — see below. |
@@ -71,7 +73,17 @@ Once both markers exist, **the range becomes the whole world** for playback:
 - with **Repeat** on, playback wraps from B back to A continuously;
 - with Repeat off, playback stops at B.
 
-Clear the markers to get the full timeline back.
+Clear the markers to get the full timeline back. Markers live for the session only —
+they are never written to disk, and opening another video resets them.
+
+### Frame stepping
+
+The two buttons either side of play move exactly one frame, pausing first if
+playback is running. Stepping is anchored on each decoded frame's own presentation
+timestamp rather than on the player's reported position, so repeated steps don't
+accumulate drift and stepping back lands on precisely the frame you left. The frame
+rate is measured from the decoded frames themselves, falling back to the file's
+declared rate. Steps clamp inside an A-B range like every other seek.
 
 ## Gestures
 
@@ -94,10 +106,11 @@ grabbing stills.
 | --- | --- | --- | --- | --- |
 | `Space` | Play / pause | | `B` | Cycle A-B markers |
 | `←` / `→` | ∓5 seconds | | `R` | Repeat |
-| `↑` / `↓` | Volume | | `M` | Mute |
-| `Home` | Stop (back to A) | | `S` | Screenshot |
-| `O` / `Ctrl+O` | Open a video | | `C` | Save the A-B clip |
-| `F` / `F11` | Fullscreen | | `Esc` | Leave fullscreen |
+| `,` / `.` | ∓1 frame | | `M` | Mute |
+| `Shift+←` / `→` | ∓1 frame | | `S` | Screenshot |
+| `↑` / `↓` | Volume | | `C` | Save the A-B clip |
+| `Home` | Stop (back to A) | | `F` / `F11` | Fullscreen |
+| `O` / `Ctrl+O` | Open a video | | `Esc` | Leave fullscreen |
 
 ---
 
