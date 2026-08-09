@@ -1,0 +1,12 @@
+# Video Trim WebUI — the browser front end. This is what the one-click
+# installer puts in the venv folder.
+
+# The web UI itself, plus the ASGI server it is mounted on.
+gradio>=4.44,<7
+uvicorn>=0.27
+fastapi>=0.110
+python-multipart>=0.0.9
+
+# Supplies a bundled ffmpeg binary so clip export and stills work without a
+# separate install. If ffmpeg is already on PATH this is optional.
+imageio-ffmpeg>=0.4.9

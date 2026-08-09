@@ -1,0 +1,25 @@
+# Flags added to every launch of the Video Trim WebUI, so you do not have to
+# type them each time. One per line; blank lines and #comments are ignored.
+#
+# The WebUI serves on http://127.0.0.1:7862 with no flags at all — that port is
+# reserved for it, and the launcher stops with an explanation rather than
+# quietly moving to another one if something else already has it.
+#
+# Available flags:
+#
+#   --listen                 also serve on 0.0.0.0, so other machines on your
+#                            network can open the WebUI
+#   --listen-port 7862       serve on a different port
+#   --listen-host 192.168.1.5   bind one specific interface
+#   --share                  also expose a temporary public gradio.live URL
+#   --no-browser             do not open a browser window on start
+#   --any-port               use the next free port instead of stopping when
+#                            the chosen one is busy
+#   --allow-remote-files     let visitors from other machines browse and open
+#                            paths on THIS machine. Off by default; without it
+#                            remote visitors have to upload their video.
+#   --proxy-height 720       height of the preview transcoded for codecs the
+#                            browser cannot play natively
+#
+# Example — reachable from your phone on the same network:
+# --listen

@@ -1,9 +1,8 @@
-"""Filesystem helpers: locating the real Windows Desktop and naming outputs."""
+"""Filesystem helpers: locating the user's real Desktop and naming outputs."""
 
-import ctypes
+import os
 import re
 import sys
-from ctypes import wintypes
 from pathlib import Path
 
 # KNOWNFOLDERID for the user's Desktop. Asking Windows for this (rather than
@@ -12,20 +11,30 @@ _FOLDERID_DESKTOP = "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}"
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-
-class _GUID(ctypes.Structure):
-    _fields_ = [
-        ("Data1", wintypes.DWORD),
-        ("Data2", wintypes.WORD),
-        ("Data3", wintypes.WORD),
-        ("Data4", ctypes.c_byte * 8),
-    ]
+# Lets the WebUI write somewhere else when it runs on a host with no Desktop
+# (a headless box, a container). Unset by default: saves go to the Desktop.
+_OUTPUT_ENV = "VIDEOTRIM_OUTPUT_DIR"
 
 
 def _known_folder(guid_str):
+    """Ask Windows where a known folder really is. ``None`` off Windows."""
     if sys.platform != "win32":
         return None
     try:
+        # Imported here rather than at module scope: ctypes.wintypes is a
+        # Windows-only module, and this file is now shared with the web UI,
+        # which runs on Linux and macOS too.
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_byte * 8),
+            ]
+
         ole32 = ctypes.windll.ole32
         shell32 = ctypes.windll.shell32
         guid = _GUID()
@@ -42,10 +51,41 @@ def _known_folder(guid_str):
         return None
 
 
+def _xdg_desktop():
+    """Read XDG_DESKTOP_DIR, which is how a localised Linux Desktop is found."""
+    if sys.platform in ("win32", "darwin"):
+        return None
+    env = os.environ.get("XDG_DESKTOP_DIR")
+    if env:
+        return Path(os.path.expandvars(env)).expanduser()
+
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    user_dirs = config / "user-dirs.dirs"
+    try:
+        text = user_dirs.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r'^\s*XDG_DESKTOP_DIR\s*=\s*"?(.*?)"?\s*$', text, re.MULTILINE)
+    if not match:
+        return None
+    raw = match.group(1).replace("$HOME", str(Path.home()))
+    return Path(os.path.expandvars(raw)).expanduser() if raw else None
+
+
+def output_dir():
+    """Where saved clips and stills land: the Desktop, or the env override."""
+    override = os.environ.get(_OUTPUT_ENV, "").strip()
+    if override:
+        target = Path(override).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    return desktop_dir()
+
+
 def desktop_dir():
     """Best effort path to the user's Desktop, falling back to the home dir."""
-    candidates = [_known_folder(_FOLDERID_DESKTOP)]
     home = Path.home()
+    candidates = [_known_folder(_FOLDERID_DESKTOP), _xdg_desktop()]
     candidates += [home / "Desktop", home / "OneDrive" / "Desktop"]
     for path in candidates:
         if path and path.is_dir():
