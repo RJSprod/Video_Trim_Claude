@@ -15,13 +15,15 @@ HTTP are the ones the user pointed at.
 
 import inspect
 import os
+import shutil
+import socket
 import string
 import sys
 import time
 from pathlib import Path
 
 import gradio as gr
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .. import ffmpeg_tools
@@ -41,6 +43,12 @@ UPLOAD_DIR = CACHE / "uploads"
 PROXY_DIR = CACHE / "proxies"
 CACHE_MAX_AGE = 24 * 3600
 
+_UPLOAD_CHUNK = 1024 * 1024
+
+# Leave this much disk free rather than filling it with an upload. ffmpeg still
+# needs somewhere to write the clip afterwards.
+UPLOAD_HEADROOM = 2 * 1024 ** 3
+
 # Containers and codecs a browser will usually decode natively. Only used to
 # warn early — the player still lets the browser decide, and offers a preview
 # transcode when it can't.
@@ -59,13 +67,53 @@ def _asset_version():
     return str(max(stamps))
 
 
-def _sweep_cache():
+_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
+
+
+def _own_addresses():
+    """Every address that means "this machine", for the local-request check."""
+    addresses = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            addresses.add(info[4][0])
+    except (OSError, socket.gaierror):
+        pass
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # reserved address; sends nothing
+        addresses.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    # IPv4-mapped form, which is how a dual-stack listener reports v4 peers.
+    for address in list(addresses):
+        if address.count(".") == 3:
+            addresses.add(f"::ffff:{address}")
+    return frozenset(addresses)
+
+
+def _sweep_cache(keep=()):
+    """Delete stale uploads and previews.
+
+    Anything still registered is kept however old it is: a long session must not
+    have its source deleted from under it.
+    """
     cutoff = time.time() - CACHE_MAX_AGE
+    protected = {str(Path(path).resolve()) for path in keep}
     for folder in (UPLOAD_DIR, PROXY_DIR):
         folder.mkdir(parents=True, exist_ok=True)
-        for item in folder.iterdir():
+        try:
+            items = list(folder.iterdir())
+        except OSError:
+            continue
+        for item in items:
             try:
-                if item.is_file() and item.stat().st_mtime < cutoff:
+                if not item.is_file() or str(item.resolve()) in protected:
+                    continue
+                if item.stat().st_mtime < cutoff:
                     item.unlink()
             except OSError:
                 pass
@@ -82,6 +130,7 @@ class VideoTrimWeb:
         self.ffmpeg = ffmpeg_tools.find_ffmpeg()
         self.ffprobe = ffmpeg_tools.find_ffprobe()
         self.asset_version = _asset_version()
+        self.local_addresses = _own_addresses()
 
     # --- helpers -------------------------------------------------------------
     def require_ffmpeg(self):
@@ -89,19 +138,37 @@ class VideoTrimWeb:
             raise HTTPException(status_code=503, detail=ffmpeg_tools.FFMPEG_HELP)
         return self.ffmpeg
 
-    def guard_local(self, request):
-        """Reading host paths is a localhost privilege unless opted out of."""
+    def is_local(self, request):
+        """True when the request came from the machine running this server.
+
+        Loopback is the obvious case. The host's own LAN addresses count too:
+        the banner prints those, so opening that URL *on the host* must not look
+        like a stranger — otherwise the file browser breaks for the one person
+        who is entitled to it.
+        """
         if self.allow_remote_files:
-            return
-        host = (request.client.host if request.client else "") or ""
-        if host in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+            return True
+        client = (request.client.host if request.client else "") or ""
+        if client in _LOOPBACK:
+            return True
+        return client in self.local_addresses
+
+    def guard_local(self, request):
+        """Reading host paths stays a local-machine privilege.
+
+        The WebUI itself is served to the whole network by default so that a
+        phone can upload a video, but "open this path" and "list this folder"
+        would hand that network the host's filesystem, so they do not travel.
+        """
+        if self.is_local(request):
             return
         raise HTTPException(
             status_code=403,
             detail=(
-                "Browsing the host filesystem is limited to the machine running "
-                "Video Trim. Upload the file instead, or start the server with "
-                "--allow-remote-files."
+                "Opening files by path is limited to the machine running Video "
+                "Trim. Upload the video instead — it will be trimmed on that "
+                "machine and saved to its Desktop. (Start the server with "
+                "--allow-remote-files to lift this.)"
             ),
         )
 
@@ -155,13 +222,17 @@ def _register_routes(app, state):
         )
 
     @app.get("/vt/api/config")
-    def config():
+    def config(request: Request):
+        # is_local decides which way the page presents itself: sitting at the
+        # host you get the path box and the folder browser, and from anywhere
+        # else you get upload, because that is all that will work.
         return {
             "output_dir": str(output_dir()),
             "ffmpeg": bool(state.ffmpeg),
             "ffmpeg_help": ffmpeg_tools.FFMPEG_HELP,
             "video_suffixes": sorted(VIDEO_SUFFIXES),
             "allow_remote_files": state.allow_remote_files,
+            "is_local": state.is_local(request),
         }
 
     @app.api_route("/vt/media/{token}", methods=["GET", "HEAD"])
@@ -210,26 +281,72 @@ def _register_routes(app, state):
             raise HTTPException(status_code=415, detail=str(exc)) from exc
 
     @app.post("/vt/api/upload")
-    async def upload(request: Request, file: UploadFile):
-        name = sanitize(Path(file.filename or "upload").name) or "upload"
-        suffix = Path(name).suffix.lower()
-        if suffix and suffix not in VIDEO_SUFFIXES:
+    async def upload(request: Request, name: str = ""):
+        """Take a video from whichever browser is driving, local or not.
+
+        This is the route a remote visitor uses, so it streams the body straight
+        to disk rather than letting the framework buffer a multi-gigabyte file
+        first. The page sends raw bytes with ?name=; a multipart form still works
+        for anything hand-rolled, at the cost of that buffering.
+        """
+        multipart = "multipart/form-data" in (request.headers.get("content-type") or "")
+
+        if multipart:
+            form = await request.form()
+            upload_file = form.get("file")
+            if upload_file is None or not hasattr(upload_file, "read"):
+                raise HTTPException(status_code=400, detail="No file was attached.")
+            name = name or (upload_file.filename or "")
+
+        safe = sanitize(Path(name or "upload").name) or "upload"
+        suffix = Path(safe).suffix.lower()
+        if not suffix:
+            raise HTTPException(
+                status_code=400,
+                detail="That upload has no file extension, so its format is unknown.",
+            )
+        if suffix not in VIDEO_SUFFIXES:
             raise HTTPException(status_code=415, detail=f"{suffix} is not a video container.")
 
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        target = unique_path(UPLOAD_DIR / name)
+        _sweep_cache(keep=state.registry.known_paths())
+
+        # Refuse before writing if it clearly will not fit, rather than filling
+        # the disk and failing at the end of a long upload.
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit():
+            free = shutil.disk_usage(UPLOAD_DIR).free
+            if int(declared) + UPLOAD_HEADROOM > free:
+                raise HTTPException(
+                    status_code=507,
+                    detail=(
+                        f"That file is {int(declared) / 1e9:.1f} GB and only "
+                        f"{free / 1e9:.1f} GB is free on the machine running "
+                        "Video Trim."
+                    ),
+                )
+
+        target = unique_path(UPLOAD_DIR / safe)
         try:
             with open(target, "wb") as handle:
-                while chunk := await file.read(1024 * 1024):
-                    handle.write(chunk)
+                if multipart:
+                    while chunk := await upload_file.read(_UPLOAD_CHUNK):
+                        handle.write(chunk)
+                    await upload_file.close()
+                else:
+                    async for chunk in request.stream():
+                        handle.write(chunk)
+            if target.stat().st_size == 0:
+                raise HTTPException(status_code=400, detail="That upload was empty.")
+        except HTTPException:
+            target.unlink(missing_ok=True)
+            raise
         except Exception as exc:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail=f"Upload failed: {exc}") from exc
-        finally:
-            await file.close()
 
         try:
-            return state.describe(target)
+            return state.describe(target, kind="upload")
         except FFmpegError as exc:
             target.unlink(missing_ok=True)
             raise HTTPException(status_code=415, detail=str(exc)) from exc
@@ -407,10 +524,13 @@ PLAYER_HTML = """
 
     <div class="vt-placeholder" id="vt-placeholder">
       <div class="vt-placeholder-mark" data-icon="play"></div>
-      <p class="vt-placeholder-title">Drop a video here</p>
+      <p class="vt-placeholder-title" id="vt-placeholder-title">Drop a video here</p>
       <p class="vt-placeholder-hint">
-        or <button type="button" class="vt-link" data-vt="browse">browse the host</button>
-        &middot; <button type="button" class="vt-link" data-vt="pick">upload a file</button>
+        <button type="button" class="vt-upload" data-vt="pick">Choose a video…</button>
+      </p>
+      <p class="vt-placeholder-hint vt-placeholder-local" id="vt-placeholder-local">
+        or <button type="button" class="vt-link" data-vt="browse">browse this machine</button>
+        for a file already on it
       </p>
       <p class="vt-placeholder-note" id="vt-output-note"></p>
     </div>
@@ -565,7 +685,9 @@ def build_blocks(state):
             "</div>"
         )
 
-        with gr.Row(equal_height=True):
+        # Hidden by the player for visitors from other machines, who cannot use
+        # either control — see applyReach() in player.js.
+        with gr.Row(equal_height=True, elem_id="vt-source-row"):
             path_box = gr.Textbox(
                 label="Video on the host machine",
                 placeholder=r"C:\Users\you\Videos\clip.mp4   —   paste a path and press Enter",

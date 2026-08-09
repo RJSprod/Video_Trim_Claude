@@ -1,25 +1,32 @@
 # Flags added to every launch of the Video Trim WebUI, so you do not have to
 # type them each time. One per line; blank lines and #comments are ignored.
 #
-# The WebUI serves on http://127.0.0.1:7862 with no flags at all — that port is
-# reserved for it, and the launcher stops with an explanation rather than
-# quietly moving to another one if something else already has it.
+# You should not need anything in here. With no flags the WebUI serves on port
+# 7862 on every interface, so it is reachable both at http://127.0.0.1:7862 on
+# this machine and at http://<this-machine's-address>:7862 from your phone or
+# another computer on the same network — the launcher prints both. That port is
+# reserved for it: if something else already has 7862 the launcher stops with an
+# explanation rather than quietly moving to another one.
+#
+# Whoever opens it can upload a video, trim it, and have the clip or still
+# written to THIS machine's Desktop. Reading files by path is the exception —
+# that stays limited to whoever is sitting at this machine.
 #
 # Available flags:
 #
-#   --listen                 also serve on 0.0.0.0, so other machines on your
-#                            network can open the WebUI
+#   --local-only             the opposite of the default: bind 127.0.0.1 only,
+#                            so nothing outside this machine can reach the WebUI
 #   --listen-port 7862       serve on a different port
 #   --listen-host 192.168.1.5   bind one specific interface
 #   --share                  also expose a temporary public gradio.live URL
 #   --no-browser             do not open a browser window on start
 #   --any-port               use the next free port instead of stopping when
 #                            the chosen one is busy
-#   --allow-remote-files     let visitors from other machines browse and open
-#                            paths on THIS machine. Off by default; without it
-#                            remote visitors have to upload their video.
+#   --allow-remote-files     also let visitors from other machines browse and
+#                            open paths on THIS machine. Off by default; without
+#                            it they upload their video instead.
 #   --proxy-height 720       height of the preview transcoded for codecs the
 #                            browser cannot play natively
 #
-# Example — reachable from your phone on the same network:
-# --listen
+# Example — keep it to this machine only:
+# --local-only

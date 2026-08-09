@@ -6,7 +6,7 @@
 # opens at http://127.0.0.1:7862
 #
 #   ./start_macos.sh                 install if needed, then launch
-#   ./start_macos.sh --listen        also reachable from the rest of the network
+#   ./start_macos.sh --local-only    keep it to this machine only
 #   ./start_macos.sh --update        reinstall the dependencies
 #
 # Flags can also go in CMD_FLAGS.txt so they apply every time.

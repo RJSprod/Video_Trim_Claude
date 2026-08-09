@@ -168,6 +168,34 @@
   word-break: break-word;
 }
 
+#vt-app .vt-placeholder-local[hidden] {
+  display: none;
+}
+
+/* The way in for anyone not sitting at the host, so it reads as the primary
+   action rather than as a fallback link. */
+#vt-app button.vt-upload {
+  min-width: 0;
+  min-height: 0;
+  margin: 4px 0 2px;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--vt-accent);
+  box-shadow: 0 6px 18px rgba(79, 195, 247, 0.22);
+  color: #062430;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+
+#vt-app button.vt-upload:hover {
+  filter: brightness(1.08);
+  background: var(--vt-accent);
+}
+
 #vt-app button.vt-link {
   background: none;
   border: 0;

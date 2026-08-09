@@ -58,11 +58,13 @@
     fullscreen: svg('<path d="M4 7.6V4h3.6M16 12.4V16h-3.6M12.4 4H16v3.6M7.6 16H4v-3.6"/>', true),
     folder: svg('<path d="M3.4 6.4a1.4 1.4 0 0 1 1.4-1.4h2.8l1.4 2h5.8a1.4 1.4 0 0 1 1.4 1.4v6a1.4 1.4 0 0 1-1.4 1.4H4.8a1.4 1.4 0 0 1-1.4-1.4z"/>', true),
     up: svg('<path d="M10 15.6V4.8M5.6 9.2L10 4.8l4.4 4.4"/>', true),
-    file: svg('<path d="M7.4 6.6L14 10l-6.6 3.4z"/>')
+    file: svg('<path d="M7.4 6.6L14 10l-6.6 3.4z"/>'),
+    upload: svg('<path d="M10 13.4V3.6M6.6 7L10 3.6 13.4 7M4.2 13.6v2.2a1 1 0 0 0 1 1h9.6a1 1 0 0 0 1-1v-2.2"/>', true)
   };
 
   var st = {
     mounted: false,
+    local: true,          // viewing from the machine running the server?
     media: null,          // the source: what exports are cut from
     playbackUrl: "",      // what the <video> is actually playing (may be a proxy)
     a: null,
@@ -534,6 +536,48 @@
     });
   }
 
+  /* Present whichever way of opening a file actually works from here.
+   *
+   * The WebUI is served to the whole network, but reading paths on the host is
+   * refused for anyone not sitting at it. Rather than let a remote visitor type
+   * a path and collect a 403, the path row and the folder browser are taken away
+   * and upload becomes the way in. */
+  function applyReach() {
+    var local = st.local;
+
+    var row = document.getElementById("vt-source-row");
+    if (row) row.style.display = local ? "" : "none";
+
+    var localHint = document.getElementById("vt-placeholder-local");
+    if (localHint) localHint.hidden = !local;
+
+    var title = document.getElementById("vt-placeholder-title");
+    if (title) {
+      title.textContent = local
+        ? "Drop a video here"
+        : "Drop a video here to send it to " + hostLabel();
+    }
+
+    // The folder button opens the host browser at the host, and the upload
+    // picker everywhere else — the same "get me a video" slot either way.
+    if (dom.btn.browse) {
+      setIcon(dom.btn.browse, local ? "folder" : "upload");
+      dom.btn.browse.title = local ? "Open a video (O)" : "Upload a video (O)";
+    }
+
+    if (dom.outputNote) {
+      dom.outputNote.textContent = local
+        ? "Clips and stills are written to " + config.output_dir + " on this machine."
+        : "Uploads are trimmed on " + hostLabel() + ", and clips and stills are " +
+          "written to its Desktop (" + config.output_dir + "). Each one is offered " +
+          "here as a download too.";
+    }
+  }
+
+  function hostLabel() {
+    return window.location.hostname || "the host";
+  }
+
   // --- loading media ---------------------------------------------------------
   function loadMedia(info) {
     st.media = info;
@@ -574,17 +618,24 @@
       .catch(function (err) { fail(err.message); });
   }
 
+  /* Send the file as the raw request body rather than as a multipart form, so
+   * the server can stream it to disk instead of buffering the whole thing first.
+   * That is what makes uploading a few gigabytes from another machine sane. */
   function uploadFile(file) {
     if (!file) return;
-    var form = new FormData();
-    form.append("file", file, file.name);
 
     var xhr = new XMLHttpRequest();
-    xhr.open("POST", "/vt/api/upload");
+    xhr.open("POST", "/vt/api/upload?name=" + encodeURIComponent(file.name));
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    var label = "Sending " + file.name + " to " + hostLabel();
     xhr.upload.onprogress = function (event) {
       if (!event.lengthComputable) return;
       var pct = Math.round((event.loaded / event.total) * 100);
-      toast("Uploading " + file.name + "…  " + pct + "%", 0);
+      toast(label + "…  " + pct + "%", 0);
+    };
+    xhr.upload.onload = function () {
+      toast(label + " — reading it…", 0);
     };
     xhr.onload = function () {
       var body = {};
@@ -597,8 +648,8 @@
       }
     };
     xhr.onerror = function () { fail("Upload failed — the connection dropped."); };
-    toast("Uploading " + file.name + "…", 0);
-    xhr.send(form);
+    toast(label + "…", 0);
+    xhr.send(file);
   }
 
   // --- browser-friendly preview ---------------------------------------------
@@ -985,7 +1036,10 @@
     screenshot: saveScreenshot,
     mute: function () { dom.video.muted = !dom.video.muted; render(); },
     fullscreen: toggleFullscreen,
-    browse: function () { openBrowser(); },
+    // One "get me a video" slot: the host browser here, the upload picker away.
+    browse: function () {
+      if (st.local) openBrowser(); else dom.fileInput.click();
+    },
     pick: function () { dom.fileInput.click(); },
     "sheet-close": closeBrowser
   };
@@ -1163,13 +1217,15 @@
     dom.fileInput = byId("vt-file-input");
     dom.outputNote = byId("vt-output-note");
 
+    // Scoped to the panel on purpose: "browse" also names the placeholder link,
+    // and an unscoped query would hand back that one instead of the button.
     dom.btn = {};
-    ["play", "stop", "back5", "fwd5", "repeat", "marker", "clip", "screenshot", "mute", "fullscreen"]
-      .forEach(function (name) {
-        dom.btn[name] = dom.app.querySelector('[data-vt="' + name + '"]');
-      });
-    dom.btn.prevFrame = dom.app.querySelector('[data-vt="prev-frame"]');
-    dom.btn.nextFrame = dom.app.querySelector('[data-vt="next-frame"]');
+    ["play", "stop", "back5", "fwd5", "repeat", "marker", "clip", "screenshot",
+     "mute", "fullscreen", "browse"].forEach(function (name) {
+      dom.btn[name] = dom.panel.querySelector('[data-vt="' + name + '"]');
+    });
+    dom.btn.prevFrame = dom.panel.querySelector('[data-vt="prev-frame"]');
+    dom.btn.nextFrame = dom.panel.querySelector('[data-vt="next-frame"]');
 
     // The toast holds its text and an optional action button.
     dom.toast.innerHTML = '<span class="vt-toast-text"></span>' +
@@ -1196,9 +1252,9 @@
     request("/vt/api/config")
       .then(function (data) {
         config = data;
-        dom.outputNote.textContent = "Clips and stills are written to " + data.output_dir +
-          " on the machine running this server.";
+        st.local = data.is_local !== false;
         dom.savedDir.textContent = data.output_dir;
+        applyReach();
         if (!data.ffmpeg) {
           fail("ffmpeg was not found — playback works, but nothing can be exported.");
         }

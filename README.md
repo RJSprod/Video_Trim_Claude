@@ -11,7 +11,7 @@ It comes two ways, sharing one engine:
 
 | | |
 | --- | --- |
-| **WebUI** | A Gradio app in your browser on **port 7862**. One-click install into a local `venv`. |
+| **WebUI** | A Gradio app in your browser on **port 7862**, reachable from your other devices out of the box. One-click install into a local `venv`. |
 | **Desktop app** | The original PySide6 window. `python app.py` |
 
 Both cut clips with the same ffmpeg command and write to the same Desktop.
@@ -34,6 +34,20 @@ The first run creates a **`venv` folder inside this directory** and installs eve
 dependency into it, then opens <http://127.0.0.1:7862> in your browser. Later runs
 see the venv is already good and start straight away.
 
+It is reachable from your other devices out of the box — no flags. The launcher
+prints the address to use:
+
+```
+  Video Trim WebUI
+  ├─ on this machine   http://127.0.0.1:7862
+  ├─ from elsewhere    http://192.168.1.42:7862
+  ├─ saving to         C:\Users\you\Desktop
+```
+
+Open that second URL on a phone or laptop, upload a video, mark the A-B loop, and
+the clip lands on the **host's** Desktop — the machine running the launcher. See
+[From another machine](#from-another-machine) for what that does and doesn't allow.
+
 Nothing is installed system-wide and nothing is written outside this folder, so
 deleting the folder uninstalls everything. All you need beforehand is Python 3.9+
 on `PATH`; the launcher checks and tells you where to get it if not.
@@ -51,25 +65,25 @@ throw the venv away and build it from scratch.
 
 ## Port 7862
 
-The WebUI is served on **127.0.0.1:7862**, and that port is treated as reserved:
-if something else already holds it, the launcher stops and tells you what to look
-for rather than quietly moving to 7863 and leaving you on a dead URL. Pass
-`--any-port` if you would rather it take the next free one.
+The WebUI is served on **port 7862** on every interface, and that port is treated
+as reserved: if something else already holds it, the launcher stops and tells you
+what to look for rather than quietly moving to 7863 and leaving you on a dead URL.
+Pass `--any-port` if you would rather it take the next free one.
 
 ## Flags
 
-Put them after the launcher (`./start_linux.sh --listen`) or one per line in
+Put them after the launcher (`./start_linux.sh --local-only`) or one per line in
 `CMD_FLAGS.txt` to apply them every time.
 
 | Flag | Effect |
 | --- | --- |
-| `--listen` | Also serve on `0.0.0.0`, so other machines on your network can open it. |
+| `--local-only` | Bind `127.0.0.1` only, so nothing outside this machine can reach it. |
 | `--listen-port 7862` | Serve on a different port. |
 | `--listen-host 192.168.1.5` | Bind one specific interface. |
 | `--share` | Also expose a temporary public `gradio.live` URL. |
 | `--no-browser` | Don't open a browser window on start. |
 | `--any-port` | Use the next free port instead of stopping when 7862 is busy. |
-| `--allow-remote-files` | Let visitors from other machines browse paths on **this** machine. |
+| `--allow-remote-files` | Also let visitors from other machines browse paths on **this** machine. |
 | `--proxy-height 720` | Height of the preview built for codecs the browser can't play. |
 | `--update` / `--recreate` / `--desktop` | Installer actions — see below. |
 
@@ -81,13 +95,38 @@ Three ways, all landing in the same player:
   running the server. Nothing is copied, so this is instant even for a 4K file.
 - **Browse…** opens a file picker that walks that machine's folders, the WebUI's
   stand-in for the desktop app's Open dialog.
-- **Drag a file onto the player**, or click *upload a file*. This one uploads a
-  copy into `cache/uploads`, so prefer a path for anything large.
+- **Drag a file onto the player**, or click *Choose a video…*. This sends the file
+  to the host, so prefer a path when you're sitting at the host anyway.
 
-Browsing and opening by path are restricted to whoever is sitting at the machine
-running the server. A visitor from elsewhere on the network gets a clear refusal
-and has to upload instead — pass `--allow-remote-files` if you actually want
-remote visitors reading that filesystem.
+## From another machine
+
+The WebUI is served to your whole network by default, so a phone, tablet or
+laptop can open it and work without anyone passing a flag. What changes for a
+visitor who isn't at the host:
+
+- **Upload is the way in.** The page notices and reshapes itself — the host path
+  box and the folder browser disappear, and *Choose a video…* plus drag-and-drop
+  become the primary action. The file streams straight to disk on the host rather
+  than being buffered in memory, so a multi-gigabyte upload is fine, and the
+  progress percentage is the real transfer.
+- **Saving does not change.** ffmpeg runs on the host, so the clip and the still
+  are written to the **host's** Desktop, exactly as if you were sitting at it.
+  Each one is also offered as a download link under the video, so you can pull a
+  copy back to the device you're holding.
+- **Reading paths on the host does not travel.** "Open this path" and "list this
+  folder" are refused for anyone but the machine running the server, so exposing
+  the WebUI doesn't expose its filesystem. Opening the LAN URL *on the host*
+  still counts as local — the host's own addresses are recognised.
+
+So the exposure is: anyone who can reach the address can upload a video, trim it,
+and cause files to be written to the host's Desktop. On a home or office network
+that is the point. If you'd rather not, `--local-only` restores loopback-only
+binding, and `--allow-remote-files` goes the other way and lets remote visitors
+browse the host's filesystem too.
+
+Uploads are kept in `cache/uploads` and swept when they are over a day old
+(anything still open in a session is never swept). An upload is refused up front
+if it clearly won't fit in the host's free disk space.
 
 ## Codecs the browser can't play
 
@@ -257,12 +296,13 @@ overwrite — a repeat save becomes `… (2)`. OneDrive-redirected Desktops are
 resolved through the Windows known-folder API, so files land where your Desktop
 actually is; on Linux the localised `XDG_DESKTOP_DIR` is honoured.
 
-**In the WebUI, "your Desktop" means the Desktop of the machine running the
-server**, because ffmpeg runs there — the browser only drives the UI. When you're
-running it locally that's the same thing. When you're reaching it from another
-machine, the files land on the host and the player also offers each one as a
-download link under the video. If the host has no Desktop at all (a headless box),
-set `VIDEOTRIM_OUTPUT_DIR` to choose where saves go.
+**In the WebUI, "your Desktop" always means the Desktop of the machine running the
+server**, because ffmpeg runs there — the browser only drives the UI. That holds
+however you got there: open it locally and it's your own Desktop; upload from a
+phone across the network and the clip still lands on the host's Desktop, with a
+download link offered under the video if you want a copy on the phone too. If the
+host has no Desktop at all (a headless box), set `VIDEOTRIM_OUTPUT_DIR` to choose
+where saves go.
 
 ```
 MyVideo_clip_01m23.4s_to_01m45.9s.mp4
@@ -340,7 +380,9 @@ ffmpeg, writing to the Desktop. Because both front ends call into
   transcode for files it won't take. Video is streamed with byte-range requests so
   scrubbing a large file doesn't wait on a download, and files are addressed by
   opaque token rather than by path, so the only things reachable over HTTP are the
-  ones you opened.
+  ones you opened. It binds every interface by default so other devices can upload;
+  the routes that read host paths check the requesting address and refuse anything
+  that isn't the host itself.
 - Built and tested on Python 3.11, with PySide6 6.11 and Gradio 6. The WebUI keeps
   to long-stable Gradio API (`Blocks`, `HTML`, event `js=`, `mount_gradio_app`) and
   pins `gradio>=4.44,<7`.

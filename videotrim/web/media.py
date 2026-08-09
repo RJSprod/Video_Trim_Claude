@@ -65,6 +65,11 @@ class MediaRegistry:
         with self._lock:
             return dict(self._by_token.get(str(token)) or {}) or None
 
+    def known_paths(self):
+        """Every path handed out so far — what the cache sweep must not delete."""
+        with self._lock:
+            return [entry["path"] for entry in self._by_token.values()]
+
 
 def content_type_for(path):
     guessed, _ = mimetypes.guess_type(str(path))

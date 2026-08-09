@@ -5,12 +5,15 @@ Normally started for you by the one-click launcher (``start_windows.bat``,
 ``start_linux.sh``, ``start_macos.sh``), which builds the ``venv`` folder beside
 this file first. To run it by hand, activate that venv and:
 
-    python webui.py                    # http://127.0.0.1:7862
-    python webui.py --listen           # reachable from the rest of the network
-    python webui.py --listen-port 7900 # somewhere other than 7862
+    python webui.py                     # port 7862, on every interface
+    python webui.py --local-only        # this machine only
+    python webui.py --listen-port 7900  # somewhere other than 7862
 
-Clips and stills are written by the machine running this script, to that
-machine's Desktop — the browser only drives the UI.
+Serving the whole network is the default so a phone or laptop can open the WebUI
+and upload a video with no flags involved. Clips and stills are always written by
+the machine running this script, to that machine's Desktop — the browser only
+drives the UI. Reading files by path stays limited to that machine; see
+guard_local in videotrim/web/server.py.
 """
 
 import argparse
@@ -28,7 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The port this app claims. Kept as a constant rather than an ad-hoc default so
 # there is exactly one place that says 7862.
 DEFAULT_PORT = 7862
-DEFAULT_HOST = "127.0.0.1"
+
+# Serve on every interface by default, so a phone or laptop elsewhere on the
+# network can open the WebUI and upload a video without anyone having to pass a
+# flag. Reading paths on the host stays a local-machine privilege regardless —
+# see guard_local in videotrim/web/server.py — so what a remote visitor can do
+# is upload, trim, and have the results written to the host's Desktop.
+DEFAULT_HOST = "0.0.0.0"
+LOOPBACK_HOST = "127.0.0.1"
 
 CMD_FLAGS_FILE = Path(__file__).resolve().parent / "CMD_FLAGS.txt"
 
@@ -68,12 +78,20 @@ def build_parser():
         help=f"port to serve on (default {DEFAULT_PORT})",
     )
     parser.add_argument(
-        "--listen", action="store_true",
-        help="serve on 0.0.0.0 so other machines on the network can reach it",
+        "--local-only", action="store_true",
+        help=(
+            "bind 127.0.0.1 only, so nothing outside this machine can reach the "
+            "WebUI. The default is to serve the whole network."
+        ),
+    )
+    parser.add_argument(
+        # Kept because it is what CMD_FLAGS.txt and older notes tell people to
+        # use; serving the network is now the default, so it does nothing.
+        "--listen", action="store_true", help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--listen-host", default=None,
-        help=f"exact interface to bind (default {DEFAULT_HOST}, or 0.0.0.0 with --listen)",
+        help=f"exact interface to bind (default {DEFAULT_HOST} — every interface)",
     )
     parser.add_argument(
         "--share", action="store_true",
@@ -86,8 +104,8 @@ def build_parser():
     parser.add_argument(
         "--allow-remote-files", action="store_true",
         help=(
-            "let non-local visitors open and browse paths on this machine. Off by "
-            "default: remote visitors must upload instead."
+            "let visitors from other machines open and browse paths on this one. "
+            "Off by default: they upload instead."
         ),
     )
     parser.add_argument(
@@ -144,6 +162,38 @@ def busy_port_message(host, port):
     )
 
 
+def lan_addresses():
+    """This machine's own routable addresses, best effort.
+
+    Printed in the banner because that is the URL you type on the phone, and
+    hostnames often do not resolve from other devices on a home network.
+    """
+    found = []
+
+    # The address that would be used to reach the outside world — on a normal
+    # home network, the one other devices can also reach. No packets are sent.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # reserved, unroutable documentation address
+        found.append(probe.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.append(info[4][0])
+    except (OSError, socket.gaierror):
+        pass
+
+    ordered = []
+    for address in found:
+        if address and not address.startswith("127.") and address not in ordered:
+            ordered.append(address)
+    return ordered
+
+
 def open_browser_later(url, delay=1.5):
     def opener():
         time.sleep(delay)
@@ -186,7 +236,7 @@ def main(argv=None):
     except ImportError as exc:
         return _missing_dependency(exc)
 
-    host = args.listen_host or ("0.0.0.0" if args.listen else DEFAULT_HOST)
+    host = args.listen_host or (LOOPBACK_HOST if args.local_only else DEFAULT_HOST)
     port = args.listen_port
 
     if not port_is_free(host, port):
@@ -201,16 +251,21 @@ def main(argv=None):
         proxy_height=args.proxy_height,
     )
 
-    shown_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    shown_host = LOOPBACK_HOST if host in ("0.0.0.0", "::") else host
     url = f"http://{shown_host}:{port}"
     state = app.state.video_trim
+    everywhere = host in ("0.0.0.0", "::")
 
     print("\n  Video Trim WebUI")
-    print(f"  ├─ open        {url}")
-    if host == "0.0.0.0":
-        print(f"  ├─ on this LAN http://{socket.gethostname()}:{port}")
-    print(f"  ├─ saving to   {output_dir()}")
-    print(f"  └─ ffmpeg      {state.ffmpeg or 'NOT FOUND — exports disabled'}\n")
+    print(f"  ├─ on this machine   {url}")
+    if everywhere:
+        for address in lan_addresses():
+            print(f"  ├─ from elsewhere    http://{address}:{port}")
+        print("  ├─                   …anyone who can reach that address can "
+              "upload and export.")
+        print("  ├─                   Use --local-only to keep it to this machine.")
+    print(f"  ├─ saving to         {output_dir()}")
+    print(f"  └─ ffmpeg            {state.ffmpeg or 'NOT FOUND — exports disabled'}\n")
 
     if args.share:
         public = start_tunnel(shown_host, port)

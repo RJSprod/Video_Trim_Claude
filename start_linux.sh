@@ -6,7 +6,7 @@
 # opens at http://127.0.0.1:7862
 #
 #   ./start_linux.sh                 install if needed, then launch
-#   ./start_linux.sh --listen        also reachable from the rest of the network
+#   ./start_linux.sh --local-only    keep it to this machine only
 #   ./start_linux.sh --update        reinstall the dependencies
 #
 # Flags can also go in CMD_FLAGS.txt so they apply every time.

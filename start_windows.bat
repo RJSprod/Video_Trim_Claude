@@ -5,8 +5,8 @@ rem Double-click this file. The first run builds a "venv" folder next to it and
 rem installs everything into that folder; later runs reuse it and start straight
 rem away. The WebUI opens at http://127.0.0.1:7862
 rem
-rem Extra flags can be passed here (start_windows.bat --listen) or written into
-rem CMD_FLAGS.txt so they apply every time.
+rem Extra flags can be passed here (start_windows.bat --local-only) or written
+rem into CMD_FLAGS.txt so they apply every time.
 
 cd /D "%~dp0"
 
