@@ -91,14 +91,21 @@ Designed for touch, and they work with a mouse too.
 
 | Gesture | Action |
 | --- | --- |
-| Single tap | Show / hide the controls. |
+| Single tap | Show the controls and keep them up; tap again to dismiss. |
 | Double tap, centre | Play / pause. |
 | Double tap, left third | Back 5 seconds. |
 | Double tap, right third | Forward 5 seconds. |
 
-The controls fade out after 3 seconds of playback and reappear on any tap or mouse
-movement. While **paused** they stay put — that's when you're marking loops and
-grabbing stills.
+**A tap pins the controls.** Once you tap to bring them up they stay up — through
+playback, pausing and mouse movement — until you tap the video again to dismiss
+them. Nothing else takes them away.
+
+The only controls that disappear on their own are ones you didn't ask for: on a
+desktop, moving the mouse reveals the bar temporarily, and that reveal fades after
+3 seconds of playback. Tapping while it is up promotes it to pinned rather than
+hiding it, so a tap never dismisses a bar you didn't summon. Using the bar — a
+button, the scrubber, even its background — resets that timer, and while **paused**
+the controls never auto-hide at all.
 
 ## Keyboard
 

@@ -25,6 +25,7 @@ def _label(dim=False, bold=False):
 
 
 class ControlBar(QWidget):
+    interacted = Signal()
     openRequested = Signal()
     playPauseRequested = Signal()
     stopRequested = Signal()
@@ -114,10 +115,23 @@ class ControlBar(QWidget):
         self.btn_shot.clicked.connect(self.screenshotRequested)
         self.btn_mute.clicked.connect(self.muteToggled)
 
+        # Touching anything on the bar counts as use, so it does not time out
+        # from under the user mid-interaction.
+        for button in centre + (self.btn_ab, self.btn_clip, self.btn_shot, self.btn_mute, self.btn_open):
+            button.pressed.connect(self.interacted)
+        self.scrubber.scrubbing.connect(lambda *_: self.interacted.emit())
+
         self._duration = 0
         self._position = 0
         self._scrub_preview = None
         self.scrubber.scrubbing.connect(self._on_scrubbing)
+
+    def mousePressEvent(self, event):
+        # Swallow presses that land on the bar's own background. Without this
+        # they propagate up to the canvas and are read as a tap on the video,
+        # dismissing the bar the user was reaching into.
+        self.interacted.emit()
+        event.accept()
 
     # --- state sync ----------------------------------------------------------
     def set_playing(self, playing):

@@ -17,7 +17,15 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QInputDevice,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QLabel, QWidget
 
 from . import icons, theme
@@ -114,6 +122,9 @@ class VideoCanvas(QWidget):
         self.controls.setGraphicsEffect(self._controls_fx)
         self._overlay = 1.0
         self._controls_shown = True
+        # Pinned means the user asked for the controls explicitly, so nothing
+        # auto-hides them again until they explicitly dismiss them.
+        self._controls_pinned = False
 
         self.toast = Toast(self)
 
@@ -152,6 +163,7 @@ class VideoCanvas(QWidget):
 
         player.sink.videoFrameChanged.connect(self._on_frame)
         player.playingChanged.connect(self._on_playing)
+        self.controls.interacted.connect(self.note_interaction)
 
         self._show_empty_state(True)
 
@@ -422,17 +434,31 @@ class VideoCanvas(QWidget):
                 self.setCursor(Qt.BlankCursor)
 
     def toggle_controls(self):
-        # Keyed off intent rather than the live opacity, so a second tap during
-        # the fade reverses it instead of repeating the same action.
-        if self._controls_shown:
-            # Stop a stray mouse jitter from immediately undoing the hide.
+        """One tap on the video. Reveals and pins, or dismisses if already pinned.
+
+        Only a pinned bar is dismissed by a tap. If the bar is merely up because
+        the mouse moved, the tap promotes it to pinned instead of hiding it --
+        otherwise a tap that the user means as "show me the controls" would hide
+        controls that appeared a moment earlier on their own.
+        """
+        if self._controls_shown and self._controls_pinned:
+            # Stop a stray mouse jitter from immediately undoing the dismiss.
             self._suppress_reveal_until = _now_ms() + 900
+            self._controls_pinned = False
             self.hide_controls()
         else:
+            self._controls_pinned = True
             self.show_controls()
+
+    def note_interaction(self):
+        """Any use of the control bar keeps it alive a while longer."""
+        if not self._controls_pinned:
+            self._restart_hide_timer()
 
     def _restart_hide_timer(self):
         self._hide_timer.stop()
+        if self._controls_pinned:
+            return
         if self._player.is_playing and self._player.has_media:
             self._hide_timer.start(AUTO_HIDE_MS)
 
@@ -481,9 +507,28 @@ class VideoCanvas(QWidget):
         self.toggle_controls()
 
     def mouseMoveEvent(self, event):
-        if self._player.has_media and _now_ms() >= self._suppress_reveal_until:
+        # A touch tap synthesises a mouse move to the touch point before the
+        # press. Revealing on that would make the tap that follows read as
+        # "already visible" and dismiss the bar the user just asked for, so
+        # hover-reveal is limited to devices that actually hover.
+        if (
+            self._player.has_media
+            and not _from_touch(event)
+            and _now_ms() >= self._suppress_reveal_until
+        ):
             self.show_controls()
         super().mouseMoveEvent(event)
+
+
+def _from_touch(event):
+    """True when this mouse event was synthesised from a touch screen."""
+    try:
+        device = event.pointingDevice()
+        if device is not None:
+            return device.type() == QInputDevice.DeviceType.TouchScreen
+    except (AttributeError, RuntimeError):
+        pass
+    return False
 
 
 def _tap_interval():
