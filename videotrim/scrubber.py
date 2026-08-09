@@ -12,8 +12,10 @@ KNOB_R_ACTIVE = 10.5
 
 
 class Scrubber(QWidget):
-    seekRequested = Signal(int)
-    scrubbing = Signal(bool, int)  # active, preview position
+    scrubStarted = Signal()
+    scrubMoved = Signal(int)  # live position, emitted throughout the drag
+    scrubEnded = Signal(int)  # final position
+    scrubbing = Signal(bool, int)  # active, preview position (drives the labels)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -117,23 +119,29 @@ class Scrubber(QWidget):
             return
         self._dragging = True
         self._position = self._ms_for(event.position().x())
+        self.scrubStarted.emit()
         self.scrubbing.emit(True, self._position)
+        self.scrubMoved.emit(self._position)
         self.update()
         event.accept()
 
     def mouseMoveEvent(self, event):
-        if self._dragging:
-            self._position = self._ms_for(event.position().x())
-            self.scrubbing.emit(True, self._position)
+        if not self._dragging:
+            return
+        position = self._ms_for(event.position().x())
+        if position != self._position:
+            self._position = position
+            self.scrubbing.emit(True, position)
+            self.scrubMoved.emit(position)
             self.update()
-            event.accept()
+        event.accept()
 
     def mouseReleaseEvent(self, event):
         if not self._dragging:
             return
         self._dragging = False
         self._position = self._ms_for(event.position().x())
-        self.seekRequested.emit(self._position)
+        self.scrubEnded.emit(self._position)
         self.scrubbing.emit(False, self._position)
         self.update()
         event.accept()

@@ -23,6 +23,10 @@ SKIP_MS = 5000
 # Used only when a file reports neither frame timings nor a frame rate.
 FALLBACK_FRAME_MS = 40.0
 
+# Live scrubbing seeks at most this often. Fast enough to look continuous,
+# slow enough not to swamp the decoder with seeks it will never finish.
+SCRUB_THROTTLE_MS = 60
+
 
 class PlayerController(QObject):
     positionChanged = Signal(int)
@@ -56,6 +60,13 @@ class PlayerController(QObject):
         # player's coarser reported position.
         self._frame_start_us = -1
         self._frame_dur_us = 0
+
+        self._scrub_resume = False
+        self._scrub_pending = None
+        self._scrub_timer = QTimer(self)
+        self._scrub_timer.setSingleShot(True)
+        self._scrub_timer.setInterval(SCRUB_THROTTLE_MS)
+        self._scrub_timer.timeout.connect(self._flush_scrub)
 
         # Polls the boundary while playing; positionChanged alone is too coarse
         # to land a tight loop cleanly.
@@ -170,6 +181,48 @@ class PlayerController(QObject):
         """Seek from the UI. Clamped into the A-B range when one is set."""
         start, end = self.bounds()
         self._seek(max(start, min(int(ms), max(start, end - 20))))
+
+    # --- scrubbing -----------------------------------------------------------
+    def begin_scrub(self):
+        """Start a drag. Playback pauses so the preview can keep up, and
+        whether it was running is remembered for the release."""
+        if not self.has_media:
+            return
+        self._scrub_resume = self.is_playing
+        if self.is_playing:
+            self._player.pause()
+
+    def scrub_to(self, ms):
+        """Live preview during a drag, rate limited to SCRUB_THROTTLE_MS."""
+        if not self.has_media:
+            return
+        start, end = self.bounds()
+        self._scrub_pending = max(start, min(int(ms), max(start, end - 20)))
+        if not self._scrub_timer.isActive():
+            self._flush_scrub()
+
+    def end_scrub(self, ms):
+        """Finish a drag: land on the exact position, then restore play state."""
+        if not self.has_media:
+            return
+        self._scrub_timer.stop()
+        self._scrub_pending = None
+        start, end = self.bounds()
+        self._seek(max(start, min(int(ms), max(start, end - 20))))
+        if self._scrub_resume:
+            self._scrub_resume = False
+            # Deliberately not play(): position() may not have caught up with
+            # the seek above yet, and play() would read that as being outside
+            # the range and snap back to the start.
+            self._player.play()
+
+    def _flush_scrub(self):
+        if self._scrub_pending is None:
+            return
+        target = self._scrub_pending
+        self._scrub_pending = None
+        self._seek(target)
+        self._scrub_timer.start()
 
     @property
     def frame_duration_ms(self):

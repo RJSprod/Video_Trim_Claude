@@ -39,7 +39,7 @@ The bar along the bottom, left to right:
 
 | Control | What it does |
 | --- | --- |
-| Scrubber | Drag or tap anywhere to seek. Shows the A-B span and its markers. |
+| Scrubber | Drag or tap anywhere to seek, with live preview as you drag. Shows the A-B span and its markers. |
 | Time | Current position (to a tenth) / total, plus the A-B range underneath. |
 | ■ Stop | Pause and jump back to the start — marker A if a loop is set, otherwise 0:00. |
 | « 5 | Back 5 seconds. |
@@ -75,6 +75,15 @@ Once both markers exist, **the range becomes the whole world** for playback:
 
 Clear the markers to get the full timeline back. Markers live for the session only —
 they are never written to disk, and opening another video resets them.
+
+### Scrubbing
+
+The video follows the scrubber live while you drag, rather than jumping only when
+you let go. Playback pauses for the duration of the drag so the preview keeps up
+and the audio doesn't stutter, then **your play state is restored on release**:
+drag while paused and it stays paused on the frame you landed on; drag during
+playback and it resumes from there. Live seeks are rate limited to roughly one
+every 60ms, and the exact release position is always applied.
 
 ### Frame stepping
 

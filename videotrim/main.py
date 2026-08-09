@@ -57,7 +57,9 @@ class MainWindow(QMainWindow):
         controls.saveClipRequested.connect(self.save_clip)
         controls.screenshotRequested.connect(self.save_screenshot)
         controls.muteToggled.connect(self.player.toggle_mute)
-        controls.scrubber.seekRequested.connect(self.player.seek)
+        controls.scrubber.scrubStarted.connect(self.player.begin_scrub)
+        controls.scrubber.scrubMoved.connect(self.player.scrub_to)
+        controls.scrubber.scrubEnded.connect(self.player.end_scrub)
 
         self.canvas.openRequested.connect(self.open_dialog)
 
