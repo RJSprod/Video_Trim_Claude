@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWi
 from . import theme
 from .icons import ABButton, GlassButton
 from .scrubber import Scrubber
+from .timefmt import fmt_time
 
 
 def _label(dim=False, bold=False):
@@ -154,10 +155,10 @@ class ControlBar(QWidget):
         self.btn_ab.set_state(state)
         self.btn_clip.setEnabled(state == 2)
         if state == 2:
-            span = theme.fmt_time(b - a, tenths=True)
-            self.lbl_loop.setText(f"A-B  {theme.fmt_time(a)} → {theme.fmt_time(b)}   ({span})")
+            span = fmt_time(b - a, tenths=True)
+            self.lbl_loop.setText(f"A-B  {fmt_time(a)} → {fmt_time(b)}   ({span})")
         elif state == 1:
-            self.lbl_loop.setText(f"A  {theme.fmt_time(a)} — tap A-B again to set B")
+            self.lbl_loop.setText(f"A  {fmt_time(a)} — tap A-B again to set B")
         else:
             self.lbl_loop.setText("")
         self._refresh_time()
@@ -195,4 +196,4 @@ class ControlBar(QWidget):
 
     def _refresh_time(self):
         shown = self._scrub_preview if self._scrub_preview is not None else self._position
-        self.lbl_time.setText(f"{theme.fmt_time(shown, tenths=True)} / {theme.fmt_time(self._duration)}")
+        self.lbl_time.setText(f"{fmt_time(shown, tenths=True)} / {fmt_time(self._duration)}")

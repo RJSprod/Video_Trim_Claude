@@ -1,7 +1,11 @@
 __pycache__/
 *.py[cod]
+
+# The one-click installer builds its venv here, plus scratch space for uploads
+# and transcoded previews. Neither belongs in the repository.
 .venv/
 venv/
+cache/
 
 # A locally-dropped ffmpeg binary is picked up automatically; don't commit it.
 ffmpeg/

@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 from . import theme
 from .canvas import VideoCanvas
-from .exporter import FFMPEG_HELP, ClipExporter, clip_target_path, find_ffmpeg, save_screenshot
+from .exporter import ClipExporter, clip_target_path, save_screenshot
+from .ffmpeg_tools import FFMPEG_HELP, find_ffmpeg
 from .player import PlayerController
 
 VIDEO_FILTER = (
