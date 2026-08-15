@@ -8,10 +8,14 @@
  *   - Stop returns to A, Repeat wraps B back to A;
  *   - scrubbing previews live and restores the play state on release.
  *
- * Exports are not done here: the clip and the still are cut by ffmpeg on the
- * server, from the original file, into the server's own working folder, and are
- * then copied into whatever save folder the host chose. This page never learns
- * that folder's path unless the server decided this session may see one.
+ * Where the work happens depends on where the file is. A file you pick on this
+ * device plays from a blob URL and is never sent anywhere; its stills are
+ * captured here on a canvas, and only the PNG travels. Cutting a clip is the
+ * one thing the browser cannot do at full quality, so that — and only that —
+ * sends the source to the host, where ffmpeg cuts from the original.
+ *
+ * Saved files are created in whatever folder the host chose. This page never
+ * learns that folder's path unless the server decided this session may see one.
  */
 (function () {
   "use strict";
@@ -88,7 +92,10 @@
     flashTimers: {},
     busy: null,           // an in-flight clip/proxy job id
     saved: [],
-    browseDir: ""
+    browseDir: "",
+    localFile: null,      // a File being played from this device, never sent
+    objectUrl: "",        // its blob URL, revoked when another file replaces it
+    fpsSamples: []        // frame gaps, for measuring the rate of a local file
   };
 
   // --- formatting (mirrors videotrim/timefmt.py) -----------------------------
@@ -601,11 +608,18 @@
           "clips and stills cannot be saved.";
       } else if (config.can_write === false) {
         dom.outputNote.textContent = config.write_reason || "File transfer disabled by host";
+      } else if (local) {
+        dom.outputNote.textContent =
+          "Clips and stills are created in " + config.destination + " on this machine.";
       } else {
-        dom.outputNote.textContent = local
-          ? "Clips and stills are created in " + config.destination + " on this machine."
-          : "Clips and stills are created in " + config.destination +
-            ", and offered here as a download too. Nothing already there is replaced.";
+        // Say plainly what leaves the device, because that is the question
+        // somebody picking a 4 GB file actually has.
+        dom.outputNote.textContent =
+          "A video you choose here plays on this device and is not sent anywhere. " +
+          "Stills are captured here and only the picture is sent. Cutting a clip " +
+          "needs the video on " + hostLabel() + ", so that is when it is sent. " +
+          "Saved files are created in " + config.destination +
+          " — nothing already there is replaced.";
       }
     }
   }
@@ -642,6 +656,71 @@
     }
   }
 
+  /* Play a file the user picked, straight from their own disk.
+   *
+   * Nothing is sent anywhere. A blob URL is the same <video> element and the
+   * same A-B rules, so marking, scrubbing and frame stepping all work on a file
+   * the host has never seen — which also means a 4 GB source is instant instead
+   * of a long upload you might not even want.
+   *
+   * The host only ever receives what you actually ask it to save: a still, or
+   * the source at the moment you ask for a clip. */
+  function loadLocalFile(file) {
+    if (!file) return;
+    if (st.objectUrl) {
+      URL.revokeObjectURL(st.objectUrl);
+      st.objectUrl = null;
+    }
+
+    var url = URL.createObjectURL(file);
+    st.objectUrl = url;
+    st.localFile = file;
+    st.fpsSamples = [];
+
+    st.media = {
+      name: file.name,
+      local: true,
+      token: "",
+      duration_ms: 0,
+      fps: 0,
+      width: 0,
+      height: 0,
+      codec: ""
+    };
+    st.playbackUrl = url;
+    clearMarkers();
+    st.frameStartMs = -1;
+    st.busy = null;
+
+    dom.app.setAttribute("data-state", "ready");
+    dom.video.src = url;
+    dom.video.load();
+    trackFrames();
+    render();
+    bumpAutoHide();
+    toast("Playing " + file.name + " from this device — nothing has been sent.", 3200);
+  }
+
+  /* The browser could not decode it locally. Cutting still needs the host's
+   * ffmpeg, so fall back to sending it and let the server drive playback. */
+  function fallBackToUpload(reason) {
+    var file = st.localFile;
+    if (!file) return false;
+    st.localFile = null;
+    toast(reason, 0);
+    uploadFile(file)
+      .then(function (info) {
+        hideToast();
+        loadMedia(info);
+        if (info.likely_playable === false) {
+          offerProxy("This file may not play in a browser. A preview can be " +
+                     "transcoded — clips are still cut from the original.");
+        }
+      })
+      .catch(function (err) { fail(err.message); });
+    return true;
+  }
+
   function openPath(path) {
     var raw = (path || "").trim();
     if (!raw) {
@@ -654,38 +733,84 @@
       .catch(function (err) { fail(err.message); });
   }
 
-  /* Send the file as the raw request body rather than as a multipart form, so
-   * the server can stream it to disk instead of buffering the whole thing first.
-   * That is what makes uploading a few gigabytes from another machine sane. */
-  function uploadFile(file) {
-    if (!file) return;
+  /* Make sure the host has the source, uploading it now if this is a local
+   * file. Resolves with the server-side media info. */
+  function ensureOnHost() {
+    if (st.media && st.media.token) return Promise.resolve(st.media);
+    if (!st.localFile) {
+      return Promise.reject(new Error("That video is no longer open."));
+    }
+    var markers = { a: st.a, b: st.b };
+    return uploadFile(st.localFile).then(function (info) {
+      hideToast();
+      // Keep playing the local copy; the upload exists only so ffmpeg can cut
+      // from it. Re-loading the server URL here would restart playback and
+      // throw away the markers the user just set.
+      st.media.token = info.token;
+      st.media.fps = st.media.fps || info.fps;
+      st.media.width = st.media.width || info.width;
+      st.media.height = st.media.height || info.height;
+      st.a = markers.a;
+      st.b = markers.b;
+      render();
+      return info;
+    });
+  }
 
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", "/vt/api/upload?name=" + encodeURIComponent(file.name));
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  /* Send a blob as the raw request body rather than as a multipart form, so the
+   * server can stream it to disk instead of buffering the whole thing first.
+   * That is what makes sending a few gigabytes from another machine sane.
+   *
+   * Every state-changing request in this file goes through here or through
+   * request() above, and both attach the CSRF header. Hand-rolling one more XHR
+   * is how the header gets forgotten — which is exactly what happened once. */
+  function sendBlob(url, blob, options) {
+    options = options || {};
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.setRequestHeader("X-VT-CSRF", csrfToken());
+      xhr.withCredentials = true;
+
+      if (options.onProgress) {
+        xhr.upload.onprogress = function (event) {
+          if (!event.lengthComputable) return;
+          options.onProgress(Math.round((event.loaded / event.total) * 100));
+        };
+      }
+      if (options.onSent) xhr.upload.onload = options.onSent;
+
+      xhr.onload = function () {
+        if (xhr.status === 401) {
+          window.location.href = "/login";
+          reject(new Error("Login required"));
+          return;
+        }
+        var body = {};
+        try { body = JSON.parse(xhr.responseText || "{}"); } catch (err) { /* ignore */ }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(body);
+        } else {
+          reject(new Error(body.detail || ("Request failed (" + xhr.status + ")")));
+        }
+      };
+      xhr.onerror = function () { reject(new Error("The connection dropped.")); };
+      xhr.send(blob);
+    });
+  }
+
+  /* Copy the source to the host. Only reached when something actually needs it
+   * there — cutting a clip — because playback and stills are done locally. */
+  function uploadFile(file) {
+    if (!file) return Promise.reject(new Error("No file."));
 
     var label = "Sending " + file.name + " to " + hostLabel();
-    xhr.upload.onprogress = function (event) {
-      if (!event.lengthComputable) return;
-      var pct = Math.round((event.loaded / event.total) * 100);
-      toast(label + "…  " + pct + "%", 0);
-    };
-    xhr.upload.onload = function () {
-      toast(label + " — reading it…", 0);
-    };
-    xhr.onload = function () {
-      var body = {};
-      try { body = JSON.parse(xhr.responseText || "{}"); } catch (err) { /* ignore */ }
-      if (xhr.status >= 200 && xhr.status < 300) {
-        hideToast();
-        loadMedia(body);
-      } else {
-        fail(body.detail || ("Upload failed (" + xhr.status + ")"));
-      }
-    };
-    xhr.onerror = function () { fail("Upload failed — the connection dropped."); };
     toast(label + "…", 0);
-    xhr.send(file);
+    return sendBlob("/vt/api/upload?name=" + encodeURIComponent(file.name), file, {
+      onProgress: function (pct) { toast(label + "…  " + pct + "%", 0); },
+      onSent: function () { toast(label + " — reading it…", 0); }
+    });
   }
 
   // --- browser-friendly preview ---------------------------------------------
@@ -699,6 +824,9 @@
 
   function buildProxy() {
     if (!hasMedia() || st.busy) return;
+    // Only ever reached for media the host already holds; a local file that
+    // will not decode takes the upload fallback in onVideoError() instead.
+    if (!st.media.token) return;
     postJson("/vt/api/proxy", { token: st.media.token })
       .then(function (job) {
         if (job.state === "done" && job.proxy_url) {
@@ -774,12 +902,23 @@
       return;
     }
 
-    toast("Exporting clip…  0%", 0);
-    postJson("/vt/api/clip", {
-      token: st.media.token,
-      a_ms: Math.round(st.a),
-      b_ms: Math.round(st.b)
-    })
+    /* Cutting is the one thing the browser cannot do at full quality, so this
+     * is where a local file finally gets sent — and only the first time, and
+     * only because you asked for a clip. */
+    var a = Math.round(st.a);
+    var b = Math.round(st.b);
+
+    if (st.media.local && !st.media.token) {
+      toast("Sending the video so it can be cut…", 0);
+    } else {
+      toast("Exporting clip…  0%", 0);
+    }
+
+    ensureOnHost()
+      .then(function () {
+        toast("Exporting clip…  0%", 0);
+        return postJson("/vt/api/clip", { token: st.media.token, a_ms: a, b_ms: b });
+      })
       .then(function (job) {
         st.busy = job.id;
         render();
@@ -790,8 +929,60 @@
       .catch(function (err) { fail(err.message); });
   }
 
+  /* Grab the frame on screen as a PNG, in the browser, at the source's own
+   * pixel size — a still from a 4K video is 3840×2160 however small the window
+   * is. For a local file this means the host receives the still and nothing
+   * else; the video itself never leaves the device. */
+  function captureFrame() {
+    var video = dom.video;
+    var width = video.videoWidth;
+    var height = video.videoHeight;
+    if (!width || !height) {
+      return Promise.reject(new Error("There is no frame to capture yet."));
+    }
+    return new Promise(function (resolve, reject) {
+      var canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      try {
+        canvas.getContext("2d").drawImage(video, 0, 0, width, height);
+      } catch (err) {
+        reject(new Error("This video cannot be captured in the browser."));
+        return;
+      }
+      if (!canvas.toBlob) {
+        reject(new Error("This browser cannot save a still."));
+        return;
+      }
+      canvas.toBlob(function (blob) {
+        if (blob) resolve(blob);
+        else reject(new Error("The frame could not be encoded."));
+      }, "image/png");
+    });
+  }
+
   function saveScreenshot() {
     if (!hasMedia()) return;
+    var position = Math.round(positionMs());
+
+    // A local file is captured here and only the PNG is sent. A file already on
+    // the host is captured there by ffmpeg, which is exact and costs no upload.
+    if (st.media.local) {
+      toast("Capturing frame…", 0);
+      captureFrame()
+        .then(function (blob) {
+          toast("Saving the still…", 0);
+          return sendBlob(
+            "/vt/api/still?name=" + encodeURIComponent(st.media.name) +
+            "&position_ms=" + position,
+            blob
+          );
+        })
+        .then(function (saved) { reportOutcome(saved, "the still"); })
+        .catch(function (err) { fail(err.message); });
+      return;
+    }
+
     if (!config.ffmpeg) {
       fail("ffmpeg was not found, so stills cannot be written. Install imageio-ffmpeg in the venv and restart.");
       return;
@@ -799,7 +990,7 @@
     toast("Capturing frame…", 0);
     postJson("/vt/api/screenshot", {
       token: st.media.token,
-      position_ms: Math.round(positionMs())
+      position_ms: position
     })
       .then(function (saved) { reportOutcome(saved, "the still"); })
       .catch(function (err) { fail(err.message); });
@@ -917,9 +1108,28 @@
     var video = dom.video;
     if (!video || typeof video.requestVideoFrameCallback !== "function") return;
     var token = st.playbackUrl;
+    var previous = -1;
     var step = function (now, meta) {
       if (st.playbackUrl !== token) return;   // a new source took over
       if (meta && typeof meta.mediaTime === "number") {
+        /* A local file has no server-side probe, so the frame rate is measured
+         * from the frames themselves: the gap between presented timestamps is
+         * one frame. The median of a handful of samples shrugs off the odd
+         * dropped or duplicated frame. Until enough have arrived, frameMs()
+         * falls back to FALLBACK_FPS, exactly as it does for a file that
+         * reports no rate of its own. */
+        if (st.media && !st.media.fps && previous >= 0) {
+          var delta = meta.mediaTime - previous;
+          if (delta > 0.001 && delta < 1) {
+            st.fpsSamples.push(delta);
+            if (st.fpsSamples.length >= 12) {
+              var sorted = st.fpsSamples.slice().sort(function (x, y) { return x - y; });
+              st.media.fps = Math.round(1 / sorted[Math.floor(sorted.length / 2)]);
+              render();
+            }
+          }
+        }
+        previous = meta.mediaTime;
         st.frameStartMs = meta.mediaTime * 1000;
       }
       video.requestVideoFrameCallback(step);
@@ -1133,9 +1343,14 @@
     dom.video.addEventListener("volumechange", render);
     dom.video.addEventListener("durationchange", render);
     dom.video.addEventListener("loadedmetadata", function () {
-      // Trust the container when ffmpeg could not read a duration.
+      // Trust the container when ffmpeg could not read a duration — and for a
+      // local file this is the only source of it, because nothing probed it.
       if (st.media && !st.media.duration_ms && isFinite(dom.video.duration)) {
         st.media.duration_ms = Math.round(dom.video.duration * 1000);
+      }
+      if (st.media && st.media.local) {
+        st.media.width = st.media.width || dom.video.videoWidth;
+        st.media.height = st.media.height || dom.video.videoHeight;
       }
       render();
     });
@@ -1177,7 +1392,7 @@
       dom.stage.classList.remove("vt-dragging");
       var files = event.dataTransfer && event.dataTransfer.files;
       if (files && files.length) {
-        uploadFile(files[0]);
+        loadLocalFile(files[0]);
         return;
       }
       // Dragging from a file manager sometimes yields a path instead.
@@ -1186,7 +1401,7 @@
     });
     dom.fileInput.addEventListener("change", function () {
       if (dom.fileInput.files && dom.fileInput.files.length) {
-        uploadFile(dom.fileInput.files[0]);
+        loadLocalFile(dom.fileInput.files[0]);
         dom.fileInput.value = "";
       }
     });
@@ -1223,9 +1438,22 @@
   function onVideoError() {
     var error = dom.video.error;
     if (!error || !st.media) return;
-    // 4 = the container/codec is not supported, 3 = it decoded badly. Either
-    // way ffmpeg can still read the file, so offer a transcoded preview.
-    if (error.code === 4 || error.code === 3) {
+    // 4 = the container/codec is not supported, 3 = it decoded badly.
+    var undecodable = error.code === 4 || error.code === 3;
+
+    /* A local file the browser cannot decode is the one case where playing it
+     * here is not an option — MKV and HEVC are the usual culprits. ffmpeg can
+     * still read it, so send it after all and say why, rather than leaving a
+     * black frame and a file that "does not work". */
+    if (undecodable && st.media.local) {
+      fallBackToUpload(
+        "Your browser cannot play this file, so it is being sent to " +
+        hostLabel() + " where ffmpeg can read it…"
+      );
+      return;
+    }
+
+    if (undecodable) {
       offerProxy(
         "Your browser cannot play this file" +
         (st.media.codec ? " (" + st.media.codec + ")" : "") +

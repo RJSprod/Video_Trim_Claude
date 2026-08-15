@@ -188,6 +188,67 @@ def test_a_mutation_with_a_wrong_csrf_header_is_refused(app):
     assert response.status_code == 403
 
 
+# Every state-changing route the front end calls. Each one is exercised twice:
+# once without the CSRF header to prove the guard is live, and once with it to
+# prove the guard is not the thing breaking the feature. The second half is the
+# half that matters — a shipped client that never sends the header turns every
+# one of these into a dead button, which is exactly what happened to
+# /vt/api/upload when its XHR was written by hand instead of going through the
+# shared sender.
+MUTATING_ROUTES = [
+    "/vt/api/upload?name=clip.mp4",
+    "/vt/api/still?name=clip.mp4&position_ms=0",
+    "/vt/api/transfer/upload?name=photo.jpg",
+    "/vt/api/transfer/request-access",
+    "/vt/api/settings/save-label",
+]
+
+
+@pytest.mark.parametrize("route", MUTATING_ROUTES)
+def test_mutating_route_requires_csrf(app, route):
+    with client(app) as session:
+        sign_in(session)
+        response = session.post(route, content=b"x")
+    assert response.status_code == 403, f"{route} accepted a request with no CSRF token"
+
+
+@pytest.mark.parametrize("route", MUTATING_ROUTES)
+def test_mutating_route_accepts_the_token_the_client_holds(app, route):
+    """The regression guard: the token in the cookie must actually work.
+
+    A 400/413/415/503 here is fine — that is the route judging the body. A 403
+    is not: it means a correctly-behaved client is being turned away.
+    """
+    with client(app) as session:
+        csrf = sign_in(session)
+        response = session.post(route, headers={"X-VT-CSRF": csrf}, content=b"x")
+    assert response.status_code != 403, (
+        f"{route} rejected the CSRF token the client was given"
+    )
+
+
+def test_every_front_end_request_carries_the_csrf_header():
+    """Static guard over the shipped JS.
+
+    The bug was not a missing rule, it was one request that did not go through
+    the code implementing the rule. So this asserts on shape: every
+    XMLHttpRequest in the assets sets the header, and every POST helper does
+    too. Adding a hand-rolled XHR without it fails here rather than in
+    somebody's browser.
+    """
+    from videotrim.web.server import ASSETS
+
+    for name in ("player.js", "shell.js"):
+        source = (ASSETS / name).read_text(encoding="utf-8")
+        opens = source.count("new XMLHttpRequest()")
+        headers = source.count("X-VT-CSRF")
+        assert opens > 0, f"{name} has no XHR; update this test if that changed"
+        assert headers >= opens, (
+            f"{name} creates {opens} XMLHttpRequest(s) but sets the CSRF header "
+            f"only {headers} time(s) — one of them will 403 at runtime"
+        )
+
+
 # --- host admin --------------------------------------------------------------
 def test_remote_client_cannot_reach_settings(app):
     with client(app, host="192.168.1.77") as session:

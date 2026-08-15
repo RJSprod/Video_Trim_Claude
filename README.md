@@ -171,8 +171,34 @@ Three ways, all landing in the same player:
   running the server. Nothing is copied, so this is instant even for a 4K file.
 - **Browse…** opens a file picker that walks that machine's folders, the web app's
   stand-in for the desktop app's Open dialog.
-- **Drag a file onto the player**, or click *Choose a video…*. This sends the file
-  to the host, so prefer a path when you're sitting at the host anyway.
+- **Drag a file onto the player**, or click *Choose a video…*. The file plays
+  from your own device and is **not** sent anywhere — see below.
+
+## What actually gets sent
+
+A video you pick from the device you're holding plays locally, from a blob URL.
+Marking A-B, scrubbing, frame stepping and repeat all work on a file the host
+has never seen, so a 4 GB source opens instantly instead of after a long upload
+you might not have wanted in the first place.
+
+From there:
+
+| You do this | What leaves your device |
+| --- | --- |
+| Play, mark A-B, scrub, step frames | Nothing |
+| **Screenshot** | Just the PNG. Captured in the browser at the source's own pixel size. |
+| **Save clip** | The video, at that moment — because cutting needs ffmpeg. |
+
+So if you only ever take stills, the video never travels. The clip is the one
+case that needs the source on the host, and it is sent when you press the button
+rather than when you open the file.
+
+Two things follow from playing locally. There is no server-side probe, so the
+frame rate is measured from the frames themselves — the first second or so of
+playback settles it, and stepping falls back to 25 fps until then, exactly as it
+does for a file that reports no rate. And if your browser cannot decode the file
+at all (MKV and HEVC are the usual culprits), there is nothing to play locally,
+so it is sent to the host and the player says why.
 
 ## Signing in
 
@@ -458,8 +484,10 @@ same job as one cut in the window.
 
 **Screenshots** are the source frame at native resolution — a still from a 4K video
 is 3840×2160 no matter how small the window is — with no controls baked in. The
-desktop app saves the frame it already decoded; the web app asks ffmpeg for the frame
-at that timestamp, which is the same pixels at the same size.
+desktop app saves the frame it already decoded. In the browser it depends on where
+the file is: one you picked from your own device is captured on a canvas and only
+the PNG is sent, while one already on the host is captured there by ffmpeg at that
+timestamp. Same pixels, same size, either way.
 
 ---
 

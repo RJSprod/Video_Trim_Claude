@@ -17,6 +17,7 @@ from ..paths import desktop_dir
 from ..security.auth import AuthError, validate_credentials
 from ..security.fs_boundary import OutputRootError, validate_output_root
 from ..security.network import normalize_ip
+from .parsing import read_json
 
 
 def _require_host(state, request):
@@ -48,7 +49,7 @@ def register_admin_routes(app, state):
     async def change_account(request: Request):
         """Rotate the login. Revokes every other session and its media tokens."""
         session = _require_host(state, request)
-        body = await request.json()
+        body = await read_json(request)
         current = str(body.get("current_password") or "")
         username = str(body.get("username") or "").strip()
         password = str(body.get("password") or "")
@@ -72,7 +73,7 @@ def register_admin_routes(app, state):
     async def set_save_location(request: Request):
         """Point saves at an existing folder. Never creates one, never falls back."""
         _require_host(state, request)
-        body = await request.json()
+        body = await read_json(request)
         raw = str(body.get("path") or "").strip().strip('"').strip("'")
         if not raw:
             raise HTTPException(status_code=400, detail="Choose a folder.")
@@ -91,7 +92,7 @@ def register_admin_routes(app, state):
     async def set_save_label(request: Request):
         """The name other devices see instead of the path."""
         _require_host(state, request)
-        body = await request.json()
+        body = await read_json(request)
         state.settings.set_save_label(str(body.get("label") or ""))
         return {"status": "ok", "save_label": state.settings.save_label}
 
@@ -134,7 +135,7 @@ def register_admin_routes(app, state):
     async def set_ip_permission(request: Request):
         """Flip one address. Persists immediately; the next check reflects it."""
         _require_host(state, request)
-        body = await request.json()
+        body = await read_json(request)
         address = normalize_ip(body.get("ip"))
         if not address:
             raise HTTPException(status_code=400, detail="Which address?")

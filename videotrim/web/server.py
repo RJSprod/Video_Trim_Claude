@@ -47,6 +47,7 @@ from .admin import register_admin_routes
 from .jobs import JobRegistry
 from .media import VIDEO_SUFFIXES, MediaRegistry, file_response
 from .output import CollisionPolicy, OutputService, OutputUnavailable
+from .parsing import read_json
 from .shell import TRANSFER_ROUTE, VIDEO_TRIM_ROUTE
 from .transfer import register_transfer_routes
 
@@ -67,6 +68,10 @@ _UPLOAD_CHUNK = 1024 * 1024
 # Leave this much disk free rather than filling it with an upload. ffmpeg still
 # needs somewhere to write the clip afterwards.
 UPLOAD_HEADROOM = 2 * 1024 ** 3
+
+# A browser-captured still. An 8K PNG is around 50 MB, so this is generous
+# without letting one request be unbounded.
+MAX_STILL_BYTES = 256 * 1024 ** 2
 
 # Containers and codecs a browser will usually decode natively. Only used to
 # warn early — the player still lets the browser decide, and offers a preview
@@ -252,7 +257,7 @@ def _register_shell_routes(app, state):
                 detail=f"Too many attempts. Try again in {max(1, cooling // 60)} minute(s).",
             )
 
-        body = await _body(request)
+        body = await read_json(request, required=False)
         username = str(body.get("username") or "")
         password = str(body.get("password") or "")
 
@@ -354,18 +359,6 @@ def _redirect(target):
     return Response(status_code=303, headers={"Location": target})
 
 
-async def _body(request):
-    """Accept JSON or a plain form post, so the login page works without JS."""
-    content_type = (request.headers.get("content-type") or "").lower()
-    if "application/json" in content_type:
-        try:
-            return await request.json()
-        except Exception:
-            return {}
-    form = await request.form()
-    return dict(form)
-
-
 # --- Video Trim tool routes --------------------------------------------------
 def _register_routes(app, state):
     @app.get("/vt/static/{name}")
@@ -436,7 +429,7 @@ def _register_routes(app, state):
     async def open_path(request: Request):
         session = state.require_session(request)
         state.guard_browse(request)
-        body = await request.json()
+        body = await read_json(request)
         raw = str(body.get("path") or "").strip().strip('"').strip("'")
         if not raw:
             raise HTTPException(status_code=400, detail="Give me a path to a video file.")
@@ -597,7 +590,7 @@ def _register_routes(app, state):
         state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
 
-        body = await request.json()
+        body = await read_json(request)
         source = state.registry.path_for(body.get("token"), session.id)
         if source is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
@@ -633,6 +626,72 @@ def _register_routes(app, state):
             state.output.discard_staging("exports", job_id)
         return outcome.as_dict()
 
+    @app.post("/vt/api/still")
+    async def still(request: Request, name: str = "", position_ms: int = 0):
+        """Save a frame the browser captured, without the video ever arriving.
+
+        A file played locally is never sent here, so the only thing this route
+        receives is the PNG. It is treated exactly like a Media Transfer upload:
+        bytes from a client are staged internally, checked, and published
+        through the same exclusive-create gateway — the server names the file,
+        the client cannot.
+        """
+        session = state.require_session(request)
+        state.require_write(request, session)
+
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_STILL_BYTES:
+            raise HTTPException(status_code=413, detail="That frame is too large.")
+
+        job_id = state.output.new_job_id()
+        staging = state.output.staging_dir("exports", job_id)
+        staged = staging / "frame.png"
+
+        written = 0
+        try:
+            with open(staged, "wb") as handle:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > MAX_STILL_BYTES:
+                        raise HTTPException(status_code=413,
+                                            detail="That frame is too large.")
+                    handle.write(chunk)
+            if written == 0:
+                raise HTTPException(status_code=400, detail="That frame was empty.")
+            # Bytes from a client are never trusted to be what they claim.
+            with open(staged, "rb") as handle:
+                if handle.read(8) != b"\x89PNG\r\n\x1a\n":
+                    raise HTTPException(status_code=415,
+                                        detail="That capture is not a PNG image.")
+        except HTTPException:
+            state.output.discard_staging("exports", job_id)
+            raise
+        except Exception as exc:
+            state.output.discard_staging("exports", job_id)
+            raise HTTPException(status_code=500, detail=f"Could not save that frame: {exc}") from exc
+
+        # The client supplies a source *name* only so the still can be labelled
+        # after it. The basename is generated here by the same function the
+        # host-side path uses, and re-vetted by the gateway.
+        label = Path(str(name or "frame")).name
+        try:
+            outcome = state.output.publish(
+                staged,
+                frame_name(label, max(0, int(position_ms))),
+                CollisionPolicy.UNIQUE_NEW_NAME,
+                authorize=state.write_policy.authorizer(request, session),
+                job_id=job_id,
+                session=session,
+                host_local=state.is_host_admin(request),
+            )
+        except CommitDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except OutputUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        finally:
+            state.output.discard_staging("exports", job_id)
+        return outcome.as_dict()
+
     @app.post("/vt/api/clip")
     async def clip(request: Request):
         """Start the A-B export. Cut from the original even when a proxy plays."""
@@ -640,7 +699,7 @@ def _register_routes(app, state):
         state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
 
-        body = await request.json()
+        body = await read_json(request)
         source = state.registry.path_for(body.get("token"), session.id)
         if source is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
@@ -696,7 +755,7 @@ def _register_routes(app, state):
         state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
 
-        body = await request.json()
+        body = await read_json(request)
         token = body.get("token")
         source = state.registry.path_for(token, session.id)
         if source is None:
