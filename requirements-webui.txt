@@ -7,6 +7,10 @@ uvicorn>=0.27
 fastapi>=0.110
 python-multipart>=0.0.9
 
+# Password hashing. Argon2id, from an audited implementation — there is no
+# fallback scheme, and the app refuses to start if this is missing.
+argon2-cffi>=23.1
+
 # Supplies a bundled ffmpeg binary so clip export and stills work without a
 # separate install. If ffmpeg is already on PATH this is optional.
 imageio-ffmpeg>=0.4.9

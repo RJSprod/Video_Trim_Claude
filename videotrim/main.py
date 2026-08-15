@@ -1,6 +1,7 @@
 """Application window: wires the player, the overlay UI and the exporters."""
 
 import ctypes
+import secrets
 import sys
 from pathlib import Path
 
@@ -10,7 +11,12 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 from . import theme
 from .canvas import VideoCanvas
-from .exporter import ClipExporter, clip_target_path, save_screenshot
+from .exporter import (
+    ClipExporter,
+    clip_staging_path,
+    publish_clip,
+    save_screenshot,
+)
 from .ffmpeg_tools import FFMPEG_HELP, find_ffmpeg
 from .player import PlayerController
 
@@ -124,7 +130,12 @@ class MainWindow(QMainWindow):
             return
 
         a, b = self.player.markers
-        target = clip_target_path(self.player.path, a, b)
+        # The clip renders into the app's own cache and is published afterwards
+        # through the exclusive-create gateway, so ffmpeg never names a file in
+        # the user's save folder.
+        self._export_job = secrets.token_urlsafe(8)
+        self._export_range = (a, b)
+        target = clip_staging_path(self.player.path, a, b, self._export_job)
         self.canvas.controls.btn_clip.setEnabled(False)
         self.canvas.toast.show_message("Exporting clip…  0%", 0)
 
@@ -137,9 +148,16 @@ class MainWindow(QMainWindow):
     def _on_export_progress(self, percent):
         self.canvas.toast.show_message(f"Exporting clip…  {percent}%", 0)
 
-    def _on_export_done(self, path):
+    def _on_export_done(self, staged):
         self.canvas.controls.btn_clip.setEnabled(self.player.has_loop)
-        self.canvas.toast.show_message(f"Saved  {Path(path).name}", 3200)
+        a, b = getattr(self, "_export_range", (0, 0))
+        try:
+            saved = publish_clip(staged, self.player.path, a, b,
+                                 getattr(self, "_export_job", ""))
+        except Exception as exc:
+            self.canvas.toast.show_message(f"Could not save the clip: {exc}", 6000)
+            return
+        self.canvas.toast.show_message(f"Saved  {Path(saved).name}", 3200)
 
     def _on_export_failed(self, message):
         self.canvas.controls.btn_clip.setEnabled(self.player.has_loop)

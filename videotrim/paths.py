@@ -1,4 +1,16 @@
-"""Filesystem helpers: locating the user's real Desktop and naming outputs."""
+"""Naming helpers. **Not a security boundary.**
+
+This module used to decide where output went and whether a name was safe. Both
+jobs moved to ``videotrim/security/fs_boundary.py``, which rejects unsafe names
+outright instead of rewriting them and uses exclusive creation instead of
+"check, then open". Nothing here may be relied on to keep a file inside the save
+location.
+
+``sanitize`` below still exists because generated names have to be *pleasant*
+(a clip called ``holiday: day 2.mp4`` should become something a Windows drive
+will accept), but the gateway re-checks whatever comes out of it and refuses
+rather than trusting it.
+"""
 
 import os
 import re
@@ -6,14 +18,12 @@ import sys
 from pathlib import Path
 
 # KNOWNFOLDERID for the user's Desktop. Asking Windows for this (rather than
-# assuming ~/Desktop) is what makes OneDrive-redirected Desktops work.
+# assuming ~/Desktop) is what makes OneDrive-redirected Desktops work. Kept for
+# the Settings folder browser's shortcuts — it is a *starting point to browse*,
+# never a place anything is written by default.
 _FOLDERID_DESKTOP = "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}"
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-# Lets the WebUI write somewhere else when it runs on a host with no Desktop
-# (a headless box, a container). Unset by default: saves go to the Desktop.
-_OUTPUT_ENV = "VIDEOTRIM_OUTPUT_DIR"
 
 
 def _known_folder(guid_str):
@@ -22,8 +32,8 @@ def _known_folder(guid_str):
         return None
     try:
         # Imported here rather than at module scope: ctypes.wintypes is a
-        # Windows-only module, and this file is now shared with the web UI,
-        # which runs on Linux and macOS too.
+        # Windows-only module, and this file is shared with the web UI, which
+        # runs on Linux and macOS too.
         import ctypes
         from ctypes import wintypes
 
@@ -72,18 +82,12 @@ def _xdg_desktop():
     return Path(os.path.expandvars(raw)).expanduser() if raw else None
 
 
-def output_dir():
-    """Where saved clips and stills land: the Desktop, or the env override."""
-    override = os.environ.get(_OUTPUT_ENV, "").strip()
-    if override:
-        target = Path(override).expanduser()
-        target.mkdir(parents=True, exist_ok=True)
-        return target
-    return desktop_dir()
-
-
 def desktop_dir():
-    """Best effort path to the user's Desktop, falling back to the home dir."""
+    """Best effort path to the user's Desktop, for the browser's shortcut list.
+
+    Never created, never written to, and never used as a fallback destination.
+    If the host has not chosen a save location, saving fails and says so.
+    """
     home = Path.home()
     candidates = [_known_folder(_FOLDERID_DESKTOP), _xdg_desktop()]
     candidates += [home / "Desktop", home / "OneDrive" / "Desktop"]
@@ -94,25 +98,6 @@ def desktop_dir():
 
 
 def sanitize(name):
-    """Strip characters Windows refuses in filenames."""
+    """Make a generated name pleasant. Cosmetic only — the gateway still vets it."""
     cleaned = _ILLEGAL.sub("_", str(name)).strip(" .")
     return cleaned or "video"
-
-
-def unique_path(path):
-    """Return ``path``, or ``name (2).ext`` etc. if it already exists."""
-    path = Path(path)
-    if not path.exists():
-        return path
-    stem, suffix, parent = path.stem, path.suffix, path.parent
-    for index in range(2, 1000):
-        candidate = parent / f"{stem} ({index}){suffix}"
-        if not candidate.exists():
-            return candidate
-    return parent / f"{stem} ({os_unique()}){suffix}"
-
-
-def os_unique():
-    import time
-
-    return str(int(time.time()))

@@ -9,30 +9,42 @@ desktop window.
 
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from .security.fs_boundary import INSTALL_ROOT, is_internal
 
 # Keep the console window from flashing up on Windows for every ffmpeg call.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 FFMPEG_HELP = (
-    "ffmpeg is needed to cut clips but was not found.\n\n"
-    "Install it with either:\n"
-    "    pip install imageio-ffmpeg\n"
-    "    winget install Gyan.FFmpeg\n\n"
-    "…then restart the app."
+    "ffmpeg is needed to cut clips but was not found inside this installation.\n\n"
+    "Install it into the venv:\n"
+    "    pip install imageio-ffmpeg\n\n"
+    "…or drop the binary in the app's own ffmpeg/ folder, then restart. Video "
+    "Trim deliberately will not run an ffmpeg found on the system PATH."
 )
 
 # Used only when a file reports neither frame timings nor a frame rate.
 FALLBACK_FPS = 25.0
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = INSTALL_ROOT
+
+# The only protocols any invocation may use. This is not advisory: a crafted
+# HLS, concat or matroska input can otherwise make ffmpeg read arbitrary host
+# paths or issue outbound requests, turning the render pipeline into an
+# exfiltration channel. It is a demuxer option, so it has to appear *before* the
+# -i it applies to — placed after, it parses cleanly and does nothing.
+PROTOCOL_WHITELIST = ("-protocol_whitelist", "file,pipe")
 
 
 class FFmpegError(RuntimeError):
     """An ffmpeg invocation failed; the message is fit to show a user."""
+
+
+class UntrustedExecutable(FFmpegError):
+    """A binary was offered that does not live inside this installation."""
 
 
 def _exe(name):
@@ -40,15 +52,17 @@ def _exe(name):
 
 
 def _find_tool(name):
-    """Locate a binary: alongside the app, on PATH, or pip-installed."""
+    """Locate a binary that ships with this installation. Never searches PATH.
+
+    Searching PATH would let anything earlier on it decide what this app
+    executes. The imageio-ffmpeg fallback is acceptable only because it resolves
+    inside the venv — and that is verified rather than assumed, because the
+    import succeeding says nothing about where the binary ended up.
+    """
     exe = _exe(name)
     for candidate in (_ROOT / exe, _ROOT / "ffmpeg" / exe, _ROOT / "ffmpeg" / "bin" / exe):
-        if candidate.is_file():
+        if candidate.is_file() and is_internal(candidate):
             return str(candidate)
-
-    found = shutil.which(name)
-    if found:
-        return found
 
     try:
         import imageio_ffmpeg
@@ -60,11 +74,12 @@ def _find_tool(name):
     except Exception:
         return None
     if name == "ffmpeg":
-        return str(ffmpeg)
-    # imageio-ffmpeg ships ffmpeg only, but a system ffprobe often sits beside
-    # whatever ffmpeg we ended up with.
+        return str(ffmpeg) if is_internal(ffmpeg) else None
+    # imageio-ffmpeg ships ffmpeg only, but an ffprobe often sits beside it.
     sibling = ffmpeg.parent / exe
-    return str(sibling) if sibling.is_file() else None
+    if sibling.is_file() and is_internal(sibling):
+        return str(sibling)
+    return None
 
 
 def find_ffmpeg():
@@ -75,7 +90,26 @@ def find_ffprobe():
     return _find_tool("ffprobe")
 
 
+def verify_executable(path):
+    """Re-check containment immediately before running. Returns the path.
+
+    Deliberately checked here rather than only at discovery: the value could
+    have been stored, passed around, or swapped since, and the moment before
+    Popen is the only moment that matters.
+    """
+    if not path:
+        raise FFmpegError(FFMPEG_HELP)
+    resolved = Path(path).resolve()
+    if not resolved.is_file() or not is_internal(resolved):
+        raise UntrustedExecutable(
+            "Refusing to run a media tool from outside the Video Trim installation."
+        )
+    return str(resolved)
+
+
 def _run(command, timeout=60):
+    """Run a child process. Argument list, no shell, no inherited stdin."""
+    command = [verify_executable(command[0])] + [str(part) for part in command[1:]]
     return subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -85,6 +119,7 @@ def _run(command, timeout=60):
         errors="replace",
         timeout=timeout,
         creationflags=NO_WINDOW,
+        shell=False,
     )
 
 
@@ -101,16 +136,27 @@ def _fraction(text):
         return 0.0
 
 
-def _probe_with_ffprobe(ffprobe, path):
-    result = _run([
+def probe_command(ffprobe, path):
+    """ffprobe's argument list, with the protocol whitelist ahead of the input.
+
+    The probe is the first thing that touches attacker-supplied bytes — an
+    upload is probed before anything else looks at it — so this is the
+    invocation that needs the restriction most, not least.
+    """
+    return [
         ffprobe,
         "-v", "error",
+        *PROTOCOL_WHITELIST,
         "-select_streams", "v:0",
         "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,duration,codec_name",
         "-show_entries", "format=duration",
         "-of", "json",
-        str(path),
-    ])
+        "-i", str(path),
+    ]
+
+
+def _probe_with_ffprobe(ffprobe, path):
+    result = _run(probe_command(ffprobe, path))
     if result.returncode != 0:
         return None
     try:
@@ -150,6 +196,17 @@ _FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s+fps")
 _TBR_RE = re.compile(r"(\d+(?:\.\d+)?)\s+tbr")
 
 
+def ffmpeg_probe_command(ffmpeg, path):
+    """The ``ffmpeg -i`` fallback probe, whitelist first."""
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        *PROTOCOL_WHITELIST,
+        "-i", str(path),
+    ]
+
+
 def _probe_with_ffmpeg(ffmpeg, path):
     """Fall back to reading what ``ffmpeg -i`` prints about the file.
 
@@ -157,7 +214,7 @@ def _probe_with_ffmpeg(ffmpeg, path):
     path that actually runs.
     """
     # No output file: ffmpeg dumps the stream summary to stderr and exits 1.
-    result = _run([ffmpeg, "-hide_banner", "-i", str(path)])
+    result = _run(ffmpeg_probe_command(ffmpeg, path))
     text = f"{result.stderr}\n{result.stdout}"
 
     duration_ms = 0
@@ -227,14 +284,21 @@ def probe_video(path, ffmpeg=None, ffprobe=None):
 
 # --- commands ----------------------------------------------------------------
 def clip_command(ffmpeg, source, target, a_ms, b_ms, progress=True):
-    """The A-B trim. Re-encodes so the cut starts exactly on marker A."""
+    """The A-B trim. Re-encodes so the cut starts exactly on marker A.
+
+    ``target`` is always a fresh path inside the app's own cache. ffmpeg never
+    points at anything outside the installation, which is why ``-n`` here is
+    belt-and-braces rather than the thing standing between a user's file and an
+    overwrite — that job belongs to the exclusive-create gateway.
+    """
     duration_ms = max(1, int(b_ms) - int(a_ms))
     command = [
         ffmpeg,
         "-hide_banner",
         "-nostdin",
         "-loglevel", "error",
-        "-y",
+        "-n",
+        *PROTOCOL_WHITELIST,
         # Input seeking plus re-encode: ffmpeg decodes from the preceding
         # keyframe and discards, so the cut lands exactly on the A marker.
         "-ss", f"{int(a_ms) / 1000.0:.3f}",
@@ -267,7 +331,8 @@ def frame_command(ffmpeg, source, target, position_ms):
         "-hide_banner",
         "-nostdin",
         "-loglevel", "error",
-        "-y",
+        "-n",
+        *PROTOCOL_WHITELIST,
         "-ss", f"{max(0, int(position_ms)) / 1000.0:.3f}",
         "-i", str(source),
         "-frames:v", "1",
@@ -288,7 +353,8 @@ def proxy_command(ffmpeg, source, target, height=720, progress=True):
         "-hide_banner",
         "-nostdin",
         "-loglevel", "error",
-        "-y",
+        "-n",
+        *PROTOCOL_WHITELIST,
         "-i", str(source),
         "-map", "0:v:0?",
         "-map", "0:a:0?",
@@ -316,6 +382,9 @@ def run_with_progress(command, total_ms, on_progress=None, cancelled=None):
     ffmpeg. Raises FFmpegError with the last stderr line on failure.
     """
     total_ms = max(1, int(total_ms))
+    # Containment is re-checked here, the last statement before the process
+    # actually starts, rather than trusted from whenever the path was found.
+    command = [verify_executable(command[0])] + [str(part) for part in command[1:]]
     try:
         process = subprocess.Popen(
             command,
@@ -325,6 +394,7 @@ def run_with_progress(command, total_ms, on_progress=None, cancelled=None):
             universal_newlines=True,
             errors="replace",
             creationflags=NO_WINDOW,
+            shell=False,
         )
     except Exception as exc:  # pragma: no cover - depends on local install
         raise FFmpegError(f"Could not start ffmpeg: {exc}") from exc
@@ -363,7 +433,14 @@ def run_with_progress(command, total_ms, on_progress=None, cancelled=None):
 
 
 def extract_frame(ffmpeg, source, target, position_ms):
-    """Write one full-resolution PNG. Raises FFmpegError if ffmpeg refuses."""
+    """Write one full-resolution PNG to an internal staging path.
+
+    The containment check is not decoration: it is what guarantees no ffmpeg
+    invocation anywhere in this codebase can name a file outside the install
+    directory as its output.
+    """
+    if not is_internal(target):
+        raise FFmpegError("Refusing to render to a path outside the installation.")
     result = _run(frame_command(ffmpeg, source, target, position_ms), timeout=120)
     if result.returncode != 0 or not Path(target).is_file():
         detail = (result.stderr or "").strip().splitlines()
