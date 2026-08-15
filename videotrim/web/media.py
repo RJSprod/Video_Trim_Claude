@@ -24,6 +24,16 @@ VIDEO_SUFFIXES = {
     ".flv", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp",
 }
 
+# Media Transfer accepts stills as well as video. Centralised here rather than
+# trusting the browser's accept= attribute, which is a hint to the file picker
+# and not something the server may rely on.
+IMAGE_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
+    ".bmp", ".tif", ".tiff", ".avif", ".dng",
+}
+
+TRANSFERABLE_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES
+
 _CHUNK = 512 * 1024
 
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
@@ -34,36 +44,74 @@ mimetypes.add_type("video/mp2t", ".ts")
 
 
 class MediaRegistry:
-    """Maps unguessable tokens to absolute paths, for the life of the process."""
+    """Maps unguessable tokens to absolute paths, scoped to one session each.
+
+    Tokens used to be deduplicated by path and shared process-wide, which made
+    every open file readable by every client for the life of the process: a
+    remote user holding one could read anything a host-local user had ever
+    opened, quietly undoing the separation between browsing and administering.
+
+    So an entry now records who it belongs to and what capability minted it, the
+    same path opened by two sessions yields two entries, and ending a session
+    revokes its tokens. Unguessability is a nice property, not the authorization.
+    """
+
+    # What a token was created under, so a browse token cannot be replayed as
+    # something more privileged.
+    CAPABILITIES = ("host_browse", "upload", "proxy", "saved_output")
 
     def __init__(self):
         self._lock = threading.Lock()
         self._by_token = {}
-        self._by_key = {}
 
-    def add(self, path, kind="source"):
+    def add(self, path, kind="source", session_id="", capability="upload"):
         resolved = Path(path).resolve()
-        key = (str(resolved), kind)
+        token = secrets.token_urlsafe(24)
         with self._lock:
-            existing = self._by_key.get(key)
-            if existing:
-                return existing
-            token = secrets.token_urlsafe(18)
-            self._by_token[token] = {"path": resolved, "kind": kind, "added": time.time()}
-            self._by_key[key] = token
-            return token
+            self._by_token[token] = {
+                "path": resolved,
+                "kind": kind,
+                "session_id": str(session_id or ""),
+                "capability": str(capability),
+                "added": time.time(),
+            }
+        return token
 
-    def path_for(self, token):
+    def _owned_entry(self, token, session_id):
         with self._lock:
             entry = self._by_token.get(str(token))
         if not entry:
             return None
+        # An entry with no owner is a server-side internal use (the cache sweep's
+        # keep-list); it is never reachable from a request.
+        if not entry["session_id"] or entry["session_id"] != str(session_id or ""):
+            return None
+        return entry
+
+    def path_for(self, token, session_id):
+        entry = self._owned_entry(token, session_id)
+        if entry is None:
+            return None
         path = entry["path"]
         return path if path.is_file() else None
 
-    def entry_for(self, token):
+    def entry_for(self, token, session_id):
+        entry = self._owned_entry(token, session_id)
+        return dict(entry) if entry else None
+
+    def revoke_session(self, session_id):
+        """Drop every token a session held. Called when the session ends."""
+        session_id = str(session_id or "")
+        if not session_id:
+            return 0
         with self._lock:
-            return dict(self._by_token.get(str(token)) or {}) or None
+            doomed = [
+                token for token, entry in self._by_token.items()
+                if entry["session_id"] == session_id
+            ]
+            for token in doomed:
+                self._by_token.pop(token, None)
+        return len(doomed)
 
     def known_paths(self):
         """Every path handed out so far — what the cache sweep must not delete."""

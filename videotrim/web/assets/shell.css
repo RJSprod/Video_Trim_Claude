@@ -1,0 +1,469 @@
+/* The shared visual system: soft, translucent, water-like.
+ *
+ * The player already used a frosted-glass control bar, so this extends that
+ * language outward to Login, Home, Media Transfer and Settings rather than
+ * giving each mode a look of its own.
+ *
+ * Glass is aesthetic and never load-bearing. Every translucent surface sits on
+ * an opaque-enough base layer that text stays readable whatever is behind it,
+ * and no state — least of all a denied permission — is communicated by colour
+ * or transparency alone.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --vt-bg: #0b1016;
+  --vt-bg-2: #101a24;
+  --vt-ink: #eaf1f7;
+  --vt-ink-soft: #a8bccd;
+  --vt-ink-faint: #7d94a8;
+
+  /* The opaque floor under every glass surface. Contrast comes from here, so
+     the blur can be as gentle as it likes without costing legibility. */
+  --vt-glass: rgba(23, 36, 48, 0.82);
+  --vt-glass-strong: rgba(18, 29, 40, 0.94);
+  --vt-edge: rgba(160, 200, 230, 0.14);
+  --vt-edge-bright: rgba(180, 215, 240, 0.26);
+
+  --vt-accent: #6fd2e2;
+  --vt-accent-ink: #062028;
+  --vt-good: #7fe0b0;
+  --vt-warn: #f2c98a;
+  --vt-deny: #f5a3a3;
+
+  --vt-radius: 20px;
+  --vt-radius-sm: 13px;
+  --vt-radius-pill: 999px;
+
+  --vt-shadow: 0 18px 48px rgba(0, 0, 0, 0.44);
+  --vt-shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.28);
+
+  /* Touch-first: nothing interactive is smaller than this. */
+  --vt-tap: 46px;
+  --vt-gap: 16px;
+
+  --vt-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --vt-fade: 180ms;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body.vt-body {
+  margin: 0;
+  min-height: 100%;
+  color: var(--vt-ink);
+  font: 400 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  background: var(--vt-bg);
+  /* A quiet layered wash rather than a gradient with opinions. */
+  background-image:
+    radial-gradient(120% 90% at 12% -10%, rgba(84, 160, 190, 0.20), transparent 60%),
+    radial-gradient(100% 80% at 92% 8%, rgba(96, 124, 200, 0.16), transparent 62%),
+    radial-gradient(140% 120% at 50% 110%, rgba(40, 92, 110, 0.22), transparent 70%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* --- surfaces ------------------------------------------------------------- */
+.vt-glass {
+  background: var(--vt-glass);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border: 1px solid var(--vt-edge);
+  border-radius: var(--vt-radius);
+  box-shadow: var(--vt-shadow);
+}
+
+.vt-shell-frame {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 clamp(14px, 3vw, 28px) 56px;
+}
+
+/* --- header --------------------------------------------------------------- */
+.vt-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 62px;
+  margin: 0 0 clamp(16px, 3vw, 28px);
+  padding: 8px 4px;
+  background: linear-gradient(180deg, rgba(11, 16, 22, 0.94), rgba(11, 16, 22, 0.55) 70%,
+                              transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* Home is always in the same place, at the same size, in every tool. */
+.vt-home-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: var(--vt-tap);
+  padding: 0 18px 0 14px;
+  border-radius: var(--vt-radius-pill);
+  border: 1px solid var(--vt-edge);
+  background: var(--vt-glass);
+  color: var(--vt-ink);
+  font-weight: 600;
+  text-decoration: none;
+  transition: background var(--vt-fade) var(--vt-ease),
+              border-color var(--vt-fade) var(--vt-ease);
+}
+.vt-home-link:hover { background: var(--vt-glass-strong); border-color: var(--vt-edge-bright); }
+.vt-home-link-inert { visibility: hidden; }
+
+.vt-home-icon {
+  width: 15px; height: 15px;
+  border: 2px solid currentColor;
+  border-right: 0; border-top: 0;
+  transform: rotate(45deg);
+  margin-left: 4px;
+}
+
+.vt-header-title {
+  flex: 1;
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--vt-ink-soft);
+}
+
+.vt-signout {
+  min-height: var(--vt-tap);
+  padding: 0 18px;
+  border-radius: var(--vt-radius-pill);
+  border: 1px solid var(--vt-edge);
+  background: transparent;
+  color: var(--vt-ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.vt-signout:hover { color: var(--vt-ink); border-color: var(--vt-edge-bright); }
+
+/* --- home ----------------------------------------------------------------- */
+.vt-home-head { margin: clamp(8px, 4vw, 36px) 4px clamp(20px, 4vw, 32px); }
+.vt-home-head h1 {
+  margin: 0 0 6px;
+  font-size: clamp(1.9rem, 6vw, 2.6rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.vt-home-head p { margin: 0; color: var(--vt-ink-soft); font-size: 1.02rem; }
+
+.vt-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--vt-gap);
+  grid-template-columns: 1fr;           /* phone: one column */
+}
+
+.vt-card {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 112px;
+  padding: 20px;
+  text-align: left;
+  text-decoration: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: transform var(--vt-fade) var(--vt-ease),
+              border-color var(--vt-fade) var(--vt-ease),
+              background var(--vt-fade) var(--vt-ease);
+}
+.vt-card:hover { transform: translateY(-2px); border-color: var(--vt-edge-bright); }
+.vt-card:active { transform: translateY(0); }
+
+.vt-card[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.62;
+  /* Not colour alone: the label says "Coming soon" and the border goes dashed. */
+  border-style: dashed;
+}
+.vt-card[aria-disabled="true"]:hover { transform: none; border-color: var(--vt-edge); }
+
+.vt-card-icon {
+  flex: 0 0 auto;
+  width: 44px; height: 44px;
+  display: grid; place-items: center;
+  border-radius: 14px;
+  background: rgba(111, 210, 226, 0.14);
+  border: 1px solid var(--vt-edge);
+  color: var(--vt-accent);
+}
+.vt-card-icon svg { width: 22px; height: 22px; }
+
+.vt-card-body { min-width: 0; }
+.vt-card-title { margin: 2px 0 4px; font-size: 1.16rem; font-weight: 600; }
+.vt-card-text { margin: 0; color: var(--vt-ink-soft); font-size: 0.95rem; }
+.vt-card-tag {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 3px 11px;
+  border-radius: var(--vt-radius-pill);
+  border: 1px solid var(--vt-edge);
+  font-size: 0.8rem;
+  color: var(--vt-ink-faint);
+}
+
+@media (min-width: 620px)  { .vt-cards { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .vt-cards { grid-template-columns: repeat(3, 1fr); } }
+
+/* --- panels --------------------------------------------------------------- */
+.vt-tool { display: grid; gap: var(--vt-gap); }
+
+.vt-panel-card { padding: clamp(18px, 3vw, 26px); }
+.vt-panel-title { margin: 0 0 6px; font-size: 1.2rem; font-weight: 600; }
+.vt-panel-sub { margin: 0 0 16px; color: var(--vt-ink-soft); font-size: 0.95rem; }
+
+.vt-hint { margin: 12px 0 0; color: var(--vt-ink-faint); font-size: 0.88rem; }
+
+.vt-path {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: var(--vt-radius-sm);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--vt-edge);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+
+/* --- controls ------------------------------------------------------------- */
+.vt-button {
+  min-height: var(--vt-tap);
+  padding: 0 20px;
+  border-radius: var(--vt-radius-pill);
+  border: 1px solid var(--vt-edge);
+  background: var(--vt-glass);
+  color: var(--vt-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--vt-fade) var(--vt-ease),
+              border-color var(--vt-fade) var(--vt-ease);
+}
+.vt-button:hover:not(:disabled) { background: var(--vt-glass-strong); border-color: var(--vt-edge-bright); }
+.vt-button:disabled { opacity: 0.5; cursor: default; }
+
+.vt-button-primary {
+  background: var(--vt-accent);
+  border-color: transparent;
+  color: var(--vt-accent-ink);
+}
+.vt-button-primary:hover:not(:disabled) { background: #85dfed; }
+
+.vt-button-large { min-height: 56px; padding: 0 28px; font-size: 1.05rem; width: 100%; }
+@media (min-width: 620px) { .vt-button-large { width: auto; } }
+
+.vt-form { display: grid; gap: 14px; }
+.vt-form.vt-inline { grid-template-columns: 1fr auto; align-items: end; }
+@media (max-width: 620px) { .vt-form.vt-inline { grid-template-columns: 1fr; } }
+
+.vt-field { display: grid; gap: 6px; }
+.vt-field > span { font-size: 0.88rem; color: var(--vt-ink-soft); }
+.vt-field input {
+  min-height: var(--vt-tap);
+  padding: 0 15px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid var(--vt-edge);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--vt-ink);
+  font: inherit;
+}
+.vt-field input:focus { border-color: var(--vt-accent); outline: none; }
+
+.vt-row-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+
+/* Focus is always visible, and shaped like the rest of the system. */
+:where(a, button, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--vt-accent);
+  outline-offset: 3px;
+  border-radius: var(--vt-radius-sm);
+}
+
+/* --- status ---------------------------------------------------------------
+ * Four states that must never be mistaken for each other: a skip is not a
+ * failure, and a possible partial is definitely not a success. */
+.vt-status { margin: 6px 0 0; min-height: 1.2em; font-size: 0.92rem; color: var(--vt-ink-soft); }
+.vt-status[data-tone="good"]    { color: var(--vt-good); }
+.vt-status[data-tone="skip"]    { color: var(--vt-ink-soft); }
+.vt-status[data-tone="warn"]    { color: var(--vt-warn); }
+.vt-status[data-tone="deny"]    { color: var(--vt-deny); }
+
+.vt-denied {
+  padding: 18px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid rgba(245, 163, 163, 0.34);
+  background: rgba(245, 163, 163, 0.09);
+}
+.vt-denied-text { margin: 0 0 12px; font-weight: 600; color: var(--vt-deny); }
+
+/* --- transfer list -------------------------------------------------------- */
+.vt-transfer-list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }
+.vt-transfer-item {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid var(--vt-edge);
+  background: rgba(0, 0, 0, 0.22);
+}
+.vt-transfer-head { display: flex; gap: 12px; align-items: baseline; justify-content: space-between; }
+.vt-transfer-name { font-weight: 600; word-break: break-all; }
+.vt-transfer-state { font-size: 0.86rem; white-space: nowrap; }
+.vt-transfer-item[data-status="saved"]            .vt-transfer-state { color: var(--vt-good); }
+.vt-transfer-item[data-status="already_exists"]   .vt-transfer-state { color: var(--vt-ink-soft); }
+.vt-transfer-item[data-status="possible_partial"] .vt-transfer-state { color: var(--vt-warn); }
+.vt-transfer-item[data-status="failed"]           .vt-transfer-state { color: var(--vt-deny); }
+.vt-transfer-item[data-status="blocked"]          .vt-transfer-state { color: var(--vt-deny); }
+
+.vt-bar {
+  height: 7px;
+  border-radius: var(--vt-radius-pill);
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.vt-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--vt-accent);
+  transition: width 220ms var(--vt-ease);
+}
+.vt-transfer-note { margin: 0; font-size: 0.86rem; color: var(--vt-ink-faint); }
+
+/* --- settings lists ------------------------------------------------------- */
+.vt-ip-list, .vt-notice-list, .vt-browser-list {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: 10px;
+}
+
+.vt-ip-row {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid var(--vt-edge);
+  background: rgba(0, 0, 0, 0.22);
+}
+.vt-ip-row[data-pending="1"] {
+  border-color: rgba(242, 201, 138, 0.44);
+  background: rgba(242, 201, 138, 0.08);
+}
+.vt-ip-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+.vt-ip-address { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+.vt-ip-meta { margin: 0; font-size: 0.84rem; color: var(--vt-ink-faint); }
+.vt-ip-pending { margin: 0; font-size: 0.88rem; color: var(--vt-warn); }
+
+/* A big, unambiguous switch: the state is in the label as well as the shape. */
+.vt-switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; min-height: var(--vt-tap); }
+.vt-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.vt-switch-track {
+  width: 56px; height: 32px;
+  border-radius: var(--vt-radius-pill);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--vt-edge);
+  position: relative;
+  transition: background var(--vt-fade) var(--vt-ease);
+}
+.vt-switch-track::after {
+  content: "";
+  position: absolute; top: 3px; left: 3px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--vt-ink);
+  transition: transform var(--vt-fade) var(--vt-ease);
+}
+.vt-switch input:checked + .vt-switch-track { background: var(--vt-accent); }
+.vt-switch input:checked + .vt-switch-track::after { transform: translateX(24px); }
+.vt-switch input:focus-visible + .vt-switch-track { outline: 2px solid var(--vt-accent); outline-offset: 3px; }
+.vt-switch-label { font-size: 0.9rem; color: var(--vt-ink-soft); }
+
+/* Report-only. Deliberately not styled as an actionable row, because there is
+   no action — only an acknowledgement that removes the note. */
+.vt-notice {
+  padding: 14px 16px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px dashed rgba(242, 201, 138, 0.4);
+  background: rgba(242, 201, 138, 0.07);
+}
+.vt-notice p { margin: 0 0 8px; font-size: 0.9rem; }
+.vt-notice code { word-break: break-all; }
+
+.vt-browser { margin-top: 14px; }
+.vt-browser-dir {
+  margin: 0 0 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--vt-ink-faint);
+  word-break: break-all;
+}
+.vt-browser-list { max-height: 320px; overflow-y: auto; }
+.vt-browser-list button {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  min-height: var(--vt-tap);
+  padding: 0 14px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--vt-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.vt-browser-list button:hover { background: rgba(255, 255, 255, 0.09); border-color: var(--vt-edge); }
+
+.vt-empty { color: var(--vt-ink-faint); font-size: 0.9rem; }
+
+.vt-transport-note {
+  margin: 26px 4px 0;
+  color: var(--vt-ink-faint);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+/* --- the Video Trim tool's own header ------------------------------------- */
+.vt-header-tool {
+  max-width: 1080px;
+  margin: 0 auto 8px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+#vt-head { max-width: 1080px; margin: 0 auto 12px; padding: 0 10px; }
+#vt-head p { margin: 0; color: var(--vt-ink-soft); font-size: 0.96rem; }
+
+/* --- motion --------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .vt-card:hover { transform: none; }
+}
+
+/* Some people force a high-contrast mode; glass must not fight it. */
+@media (prefers-contrast: more) {
+  :root {
+    --vt-glass: rgba(12, 20, 28, 0.97);
+    --vt-glass-strong: rgba(8, 14, 20, 0.99);
+    --vt-edge: rgba(190, 220, 240, 0.4);
+    --vt-ink-soft: #cfe0ee;
+    --vt-ink-faint: #b3c7d8;
+  }
+  .vt-glass { backdrop-filter: none; -webkit-backdrop-filter: none; }
+}

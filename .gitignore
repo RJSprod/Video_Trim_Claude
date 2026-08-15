@@ -7,6 +7,10 @@ __pycache__/
 venv/
 cache/
 
+# Credentials, settings, IP history and the commit journal. Never committed.
+data/
+logs/
+
 # A locally-dropped ffmpeg binary is picked up automatically; don't commit it.
 ffmpeg/
 ffmpeg.exe

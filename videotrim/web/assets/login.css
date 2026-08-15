@@ -1,0 +1,139 @@
+/* The login page's own stylesheet.
+ *
+ * Separate from shell.css because it is the one asset the authentication
+ * middleware serves without a session, and the allowlist that permits it is an
+ * anchored prefix on "/vt/static/login." — so nothing else can ride along.
+ */
+
+:root {
+  color-scheme: dark;
+  --vt-bg: #0b1016;
+  --vt-ink: #eaf1f7;
+  --vt-ink-soft: #a8bccd;
+  --vt-ink-faint: #7d94a8;
+  --vt-glass: rgba(23, 36, 48, 0.84);
+  --vt-edge: rgba(160, 200, 230, 0.16);
+  --vt-accent: #6fd2e2;
+  --vt-accent-ink: #062028;
+  --vt-deny: #f5a3a3;
+  --vt-radius: 22px;
+  --vt-radius-sm: 13px;
+  --vt-tap: 48px;
+  --vt-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body.vt-body {
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--vt-ink);
+  font: 400 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+  background: var(--vt-bg);
+  background-image:
+    radial-gradient(120% 90% at 15% -10%, rgba(84, 160, 190, 0.22), transparent 60%),
+    radial-gradient(100% 80% at 88% 6%, rgba(96, 124, 200, 0.18), transparent 62%),
+    radial-gradient(140% 120% at 50% 112%, rgba(40, 92, 110, 0.24), transparent 70%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+.vt-login { width: 100%; max-width: 420px; }
+
+.vt-login-card {
+  padding: clamp(24px, 6vw, 36px);
+  background: var(--vt-glass);
+  backdrop-filter: blur(20px) saturate(1.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  border: 1px solid var(--vt-edge);
+  border-radius: var(--vt-radius);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.48);
+}
+
+.vt-login-title {
+  margin: 0 0 4px;
+  font-size: clamp(1.7rem, 6vw, 2.1rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.vt-login-sub { margin: 0 0 22px; color: var(--vt-ink-soft); }
+
+.vt-login-error {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid rgba(245, 163, 163, 0.36);
+  background: rgba(245, 163, 163, 0.1);
+  color: var(--vt-deny);
+  font-size: 0.92rem;
+}
+
+.vt-form { display: grid; gap: 15px; }
+.vt-field { display: grid; gap: 6px; }
+.vt-field > span { font-size: 0.88rem; color: var(--vt-ink-soft); }
+.vt-field input {
+  min-height: var(--vt-tap);
+  padding: 0 15px;
+  border-radius: var(--vt-radius-sm);
+  border: 1px solid var(--vt-edge);
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--vt-ink);
+  font: inherit;
+}
+.vt-field input:focus { border-color: var(--vt-accent); outline: none; }
+
+.vt-button {
+  min-height: var(--vt-tap);
+  padding: 0 20px;
+  border-radius: 999px;
+  border: 1px solid var(--vt-edge);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--vt-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 180ms var(--vt-ease);
+}
+.vt-button-primary {
+  background: var(--vt-accent);
+  border-color: transparent;
+  color: var(--vt-accent-ink);
+}
+.vt-button-primary:hover:not(:disabled) { background: #85dfed; }
+.vt-button:disabled { opacity: 0.55; cursor: default; }
+
+.vt-status { margin: 4px 0 0; min-height: 1.2em; font-size: 0.92rem; color: var(--vt-ink-soft); }
+.vt-status[data-tone="deny"] { color: var(--vt-deny); }
+
+:where(a, button, input):focus-visible {
+  outline: 2px solid var(--vt-accent);
+  outline-offset: 3px;
+}
+
+.vt-transport-note {
+  margin: 20px 6px 0;
+  color: var(--vt-ink-faint);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .vt-login-card {
+    background: rgba(10, 17, 24, 0.98);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-color: rgba(190, 220, 240, 0.42);
+  }
+}

@@ -1,0 +1,37 @@
+name: security
+
+# The host-protection promise is only worth something if it is checked. These
+# two jobs are the gate: the static review, which fails on any mutating
+# filesystem or subprocess call that is not accounted for in
+# security/fs_allowlist.toml, and the P0 suites.
+on:
+  push:
+  pull_request:
+
+jobs:
+  filesystem-review:
+    name: static filesystem review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Every mutating call is on the allowlist
+        run: python security/check_fs_calls.py
+
+  security-tests:
+    name: P0 security tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-webui.txt
+          pip install pytest httpx
+      - name: Run the security suite
+        run: python -m pytest tests/security -q

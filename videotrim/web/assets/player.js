@@ -9,7 +9,9 @@
  *   - scrubbing previews live and restores the play state on release.
  *
  * Exports are not done here: the clip and the still are cut by ffmpeg on the
- * server, from the original file, and land on that machine's Desktop.
+ * server, from the original file, into the server's own working folder, and are
+ * then copied into whatever save folder the host chose. This page never learns
+ * that folder's path unless the server decided this session may see one.
  */
 (function () {
   "use strict";
@@ -25,7 +27,7 @@
   var JOB_POLL_MS = 400;
 
   var dom = {};
-  var config = { output_dir: "", ffmpeg: true };
+  var config = { destination: "the host's save folder", ffmpeg: true };
 
   /* Drawn rather than typed. The desktop app builds its glyphs as vectors in
    * icons.py for the same reason: font and emoji coverage varies per platform,
@@ -515,8 +517,32 @@
   }
 
   // --- server calls ----------------------------------------------------------
+  /* Read the CSRF companion cookie. It is deliberately readable: the value is
+   * echoed in a custom header, which a cross-site form cannot set, and it is
+   * checked against the session's own token server-side. */
+  function csrfToken() {
+    var parts = (document.cookie || "").split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var pair = parts[i].trim();
+      var eq = pair.indexOf("=");
+      if (eq > 0 && pair.slice(0, eq) === "vt_csrf") return pair.slice(eq + 1);
+    }
+    return "";
+  }
+
   function request(url, options) {
+    options = options || {};
+    options.credentials = "same-origin";
+    options.headers = options.headers || {};
+    var method = (options.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      options.headers["X-VT-CSRF"] = csrfToken();
+    }
     return fetch(url, options).then(function (response) {
+      if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Login required");
+      }
       var isJson = (response.headers.get("content-type") || "").indexOf("json") >= 0;
       return (isJson ? response.json() : response.text()).then(function (body) {
         if (!response.ok) {
@@ -538,9 +564,9 @@
 
   /* Present whichever way of opening a file actually works from here.
    *
-   * The WebUI is served to the whole network, but reading paths on the host is
-   * refused for anyone not sitting at it. Rather than let a remote visitor type
-   * a path and collect a 403, the path row and the folder browser are taken away
+   * Reading paths on the host is a separate capability from being the host, and
+   * is refused for anyone who does not have it. Rather than let a visitor type a
+   * path and collect a 403, the path row and the folder browser are taken away
    * and upload becomes the way in. */
   function applyReach() {
     var local = st.local;
@@ -565,12 +591,22 @@
       dom.btn.browse.title = local ? "Open a video (O)" : "Upload a video (O)";
     }
 
+    /* Whatever the server called the destination is what gets shown. It is a
+     * real path only when the server decided this session may see one; every
+     * other session gets a display name and never a filesystem path. */
     if (dom.outputNote) {
-      dom.outputNote.textContent = local
-        ? "Clips and stills are written to " + config.output_dir + " on this machine."
-        : "Uploads are trimmed on " + hostLabel() + ", and clips and stills are " +
-          "written to its Desktop (" + config.output_dir + "). Each one is offered " +
-          "here as a download too.";
+      if (config.output_configured === false) {
+        dom.outputNote.textContent =
+          "Save location is unavailable — the host has not chosen one yet, so " +
+          "clips and stills cannot be saved.";
+      } else if (config.can_write === false) {
+        dom.outputNote.textContent = config.write_reason || "File transfer disabled by host";
+      } else {
+        dom.outputNote.textContent = local
+          ? "Clips and stills are created in " + config.destination + " on this machine."
+          : "Clips and stills are created in " + config.destination +
+            ", and offered here as a download too. Nothing already there is replaced.";
+      }
     }
   }
 
@@ -748,8 +784,7 @@
         st.busy = job.id;
         render();
         pollJob(job.id, "Exporting clip", function (done) {
-          noteSaved(done);
-          toast("Saved  " + done.saved_name, 3400);
+          reportOutcome(done, "the clip");
         });
       })
       .catch(function (err) { fail(err.message); });
@@ -766,25 +801,40 @@
       token: st.media.token,
       position_ms: Math.round(positionMs())
     })
-      .then(function (saved) {
-        noteSaved(saved);
-        toast("Saved  " + saved.saved_name, 2800);
-      })
+      .then(function (saved) { reportOutcome(saved, "the still"); })
       .catch(function (err) { fail(err.message); });
   }
 
+  /* Report what actually happened. "Saved", "skipped" and "a partial may remain"
+   * are three different outcomes, and reporting the first when the third is true
+   * is how somebody ends up trusting a file that is not right. */
+  function reportOutcome(result, fallbackLabel) {
+    if (!result) return;
+    if (result.status === "already_exists") {
+      toast("Already exists — skipped. Nothing was replaced.", 4200);
+      return;
+    }
+    if (result.status === "possible_partial") {
+      fail(result.message ||
+        "A previous transfer may have left an incomplete file with this name.");
+      return;
+    }
+    noteSaved(result);
+    toast("Saved  " + (result.saved_name || fallbackLabel), 3400);
+  }
+
   function noteSaved(saved) {
-    if (!saved || !saved.saved_name) return;
+    if (!saved || !saved.saved_name || !saved.download_url) return;
     st.saved.unshift(saved);
     st.saved = st.saved.slice(0, 6);
-    dom.savedDir.textContent = saved.saved_dir || config.output_dir;
+    dom.savedDir.textContent = config.destination || "the host's save folder";
     dom.savedList.innerHTML = "";
     st.saved.forEach(function (entry) {
       var item = document.createElement("li");
       var link = document.createElement("a");
       link.href = entry.download_url;
       link.textContent = entry.saved_name;
-      link.title = "Download " + entry.saved_path;
+      link.title = "Download " + entry.saved_name;
       link.setAttribute("download", entry.saved_name);
       item.appendChild(link);
       dom.savedList.appendChild(item);
@@ -1252,8 +1302,10 @@
     request("/vt/api/config")
       .then(function (data) {
         config = data;
-        st.local = data.is_local !== false;
-        dom.savedDir.textContent = data.output_dir;
+        // Browsing host paths, not being the host: the two are different
+        // questions and only the first one decides what this page offers.
+        st.local = data.can_browse !== false;
+        dom.savedDir.textContent = data.destination || "the host's save folder";
         applyReach();
         if (!data.ffmpeg) {
           fail("ffmpeg was not found — playback works, but nothing can be exported.");

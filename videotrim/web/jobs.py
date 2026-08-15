@@ -12,6 +12,11 @@ from pathlib import Path
 
 from .. import ffmpeg_tools
 from ..ffmpeg_tools import FFmpegError
+from ..security.fs_boundary import (
+    FilesystemPolicyError,
+    is_internal,
+    safe_internal_unlink,
+)
 
 # A finished job stays queryable this long, so a poll that lands just after the
 # encode ends still sees the result rather than a 404.
@@ -21,13 +26,25 @@ _RETAIN_SECONDS = 30 * 60
 class Job:
     """One ffmpeg run: pending → running → done | failed | cancelled."""
 
-    def __init__(self, job_id, kind, label, total_ms, command, target, on_success=None):
+    def __init__(self, job_id, kind, label, total_ms, command, target, on_success=None,
+                 owner_session="", owner_ip=""):
         self.id = job_id
         self.kind = kind
         self.label = label
         self.total_ms = max(1, int(total_ms))
         self.command = command
+        # Every job renders into the app's own cache. A job target is never
+        # external, which is what makes the cancellation cleanup below safe: it
+        # can only ever remove something this app staged.
+        if not is_internal(target):
+            raise FilesystemPolicyError(
+                "A render job may only target a path inside the installation."
+            )
         self.target = Path(target)
+        # Recorded so a permission revoked mid-render can be matched to the work
+        # it should stop.
+        self.owner_session = str(owner_session or "")
+        self.owner_ip = str(owner_ip or "")
         self.state = "pending"
         self.percent = 0
         self.error = ""
@@ -116,10 +133,17 @@ class Job:
             self.finished = time.time()
 
     def _discard_partial(self):
+        """Remove the half-written render. Internal paths only.
+
+        This used to unlink ``self.target`` unconditionally, and for clip jobs
+        that target was a file on the user's Desktop — so a failed encode
+        deleted whatever happened to be sitting at that name. Targets are now
+        internal by construction, and this proves it again before removing
+        anything.
+        """
         try:
-            if self.target.is_file():
-                self.target.unlink()
-        except OSError:
+            safe_internal_unlink(self.target)
+        except FilesystemPolicyError:
             pass
 
 
@@ -130,8 +154,10 @@ class JobRegistry:
         self._lock = threading.Lock()
         self._jobs = {}
 
-    def start(self, kind, label, total_ms, command, target, on_success=None):
-        job = Job(secrets.token_urlsafe(12), kind, label, total_ms, command, target, on_success)
+    def start(self, kind, label, total_ms, command, target, on_success=None,
+              owner_session="", owner_ip=""):
+        job = Job(secrets.token_urlsafe(12), kind, label, total_ms, command, target,
+                  on_success, owner_session=owner_session, owner_ip=owner_ip)
         with self._lock:
             self._prune()
             self._jobs[job.id] = job
@@ -152,6 +178,29 @@ class JobRegistry:
     def cancel_all(self):
         for job in self.active():
             job.cancel()
+
+    def cancel_for_session(self, session_id):
+        """Stop work owned by a session that just ended or lost permission."""
+        stopped = 0
+        for job in self.active():
+            if job.owner_session and job.owner_session == session_id:
+                job.cancel()
+                stopped += 1
+        return stopped
+
+    def cancel_for_ip(self, ip):
+        """Stop work owned by an address the host just revoked.
+
+        Only reaches jobs that are still entirely internal — anything already
+        past the external commit is finished and stays finished, because the
+        filesystem invariant outranks a late revocation.
+        """
+        stopped = 0
+        for job in self.active():
+            if job.owner_ip and job.owner_ip == ip:
+                job.cancel()
+                stopped += 1
+        return stopped
 
     def _prune(self):
         cutoff = time.time() - _RETAIN_SECONDS

@@ -1,22 +1,25 @@
-"""The web application: a Gradio page plus the routes it talks to.
+"""The web application: an authenticated shell, with Video Trim as one tool.
 
-Gradio owns the page — layout, theme, the source toolbar. The video player
-itself is hand-written HTML/JS (``assets/player.js``) because the point of this
-app is the A-B loop, and no stock component does clamped seeking, frame stepping
-or marker rendering. That player speaks to the ``/vt`` routes defined here:
+Shape of the thing:
 
-    /vt/media/<token>   the video, with byte ranges so scrubbing works
-    /vt/api/...         open, browse, screenshot, clip, job polling
-    /vt/saved/<token>   download something that was just written
+    /login                  the only unauthenticated page
+    /                       Home — the tool launcher
+    /tools/video-trim       the Gradio page and the hand-written player
+    /tools/media-transfer   device-to-host media transfer
+    /settings               host-local only
+    /vt/api/...             the routes those views talk to
+    /vt/media/<token>       a video, with byte ranges so scrubbing works
+    /vt/saved/<token>       download something this app just created
 
-Everything is opened by token, never by path, so the only files reachable over
-HTTP are the ones the user pointed at.
+Two rules run through all of it. Authentication is enforced once, by middleware
+wrapped around the *outer* application, so routes this codebase does not author
+are covered too. And every file that leaves this process does so through
+``OutputService.publish`` — features render into ``cache/`` and never learn where
+the save folder is.
 """
 
 import inspect
 import os
-import shutil
-import socket
 import string
 import sys
 import time
@@ -24,23 +27,39 @@ from pathlib import Path
 
 import gradio as gr
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from .. import ffmpeg_tools
+from ..config.settings import SettingsService
+from ..config.store import CommitJournal, Store
 from ..ffmpeg_tools import FFmpegError
 from ..naming import clip_name, frame_name
-from ..paths import output_dir, sanitize, unique_path
+from ..paths import desktop_dir, sanitize
+from ..security import fs_boundary
+from ..security.auth import COOKIE_NAME, AuthError, AuthService, LoginThrottle
+from ..security.auth import AccessRequestThrottle
+from ..security.fs_boundary import CommitDenied, ExternalReadError
+from ..security.middleware import AuthenticationMiddleware
+from ..security.network import BrowseGuard, HostAdminGuard, client_ip, rate_limit_key
+from ..security.write_policy import WritePolicy
+from . import shell
+from .admin import register_admin_routes
 from .jobs import JobRegistry
-from .media import VIDEO_SUFFIXES, file_response
+from .media import VIDEO_SUFFIXES, MediaRegistry, file_response
+from .output import CollisionPolicy, OutputService, OutputUnavailable
+from .shell import TRANSFER_ROUTE, VIDEO_TRIM_ROUTE
+from .transfer import register_transfer_routes
 
 ASSETS = Path(__file__).resolve().parent / "assets"
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = fs_boundary.INSTALL_ROOT
 
-# Uploads and preview transcodes are scratch, not output: they live here rather
-# than on the Desktop, and get swept on start-up.
-CACHE = ROOT / "cache"
+# Every scratch path this app uses lives under the install root, so the internal
+# zone is freely mutable and the external zone is create-only. Those two zones
+# may never overlap — see validate_output_root().
+CACHE = fs_boundary.CACHE_DIR
 UPLOAD_DIR = CACHE / "uploads"
 PROXY_DIR = CACHE / "proxies"
+GRADIO_TEMP = CACHE / "gradio"
 CACHE_MAX_AGE = 24 * 3600
 
 _UPLOAD_CHUNK = 1024 * 1024
@@ -55,11 +74,17 @@ UPLOAD_HEADROOM = 2 * 1024 ** 3
 _FRIENDLY_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".ogv"}
 _FRIENDLY_CODECS = {"h264", "avc1", "vp8", "vp9", "av1", "theora"}
 
+# Readable by JS on purpose: the page echoes it back in a header the middleware
+# checks against the session's own token. A cross-site form cannot set a custom
+# header, and the value is worthless without the HttpOnly session cookie.
+CSRF_COOKIE = "vt_csrf"
+
 
 def _asset_version():
-    """Bust the browser cache whenever the player source changes."""
+    """Bust the browser cache whenever the front-end source changes."""
     stamps = []
-    for name in ("player.js", "player.css"):
+    for name in ("player.js", "player.css", "shell.js", "shell.css",
+                 "login.js", "login.css"):
         try:
             stamps.append(int((ASSETS / name).stat().st_mtime))
         except OSError:
@@ -67,36 +92,8 @@ def _asset_version():
     return str(max(stamps))
 
 
-_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
-
-
-def _own_addresses():
-    """Every address that means "this machine", for the local-request check."""
-    addresses = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None):
-            addresses.add(info[4][0])
-    except (OSError, socket.gaierror):
-        pass
-
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("192.0.2.1", 9))  # reserved address; sends nothing
-        addresses.add(probe.getsockname()[0])
-    except OSError:
-        pass
-    finally:
-        probe.close()
-
-    # IPv4-mapped form, which is how a dual-stack listener reports v4 peers.
-    for address in list(addresses):
-        if address.count(".") == 3:
-            addresses.add(f"::ffff:{address}")
-    return frozenset(addresses)
-
-
 def _sweep_cache(keep=()):
-    """Delete stale uploads and previews.
+    """Delete stale uploads and previews. Internal paths only.
 
     Anything still registered is kept however old it is: a long session must not
     have its source deleted from under it.
@@ -104,7 +101,7 @@ def _sweep_cache(keep=()):
     cutoff = time.time() - CACHE_MAX_AGE
     protected = {str(Path(path).resolve()) for path in keep}
     for folder in (UPLOAD_DIR, PROXY_DIR):
-        folder.mkdir(parents=True, exist_ok=True)
+        fs_boundary.ensure_internal_dir(folder)
         try:
             items = list(folder.iterdir())
         except OSError:
@@ -114,77 +111,102 @@ def _sweep_cache(keep=()):
                 if not item.is_file() or str(item.resolve()) in protected:
                     continue
                 if item.stat().st_mtime < cutoff:
-                    item.unlink()
+                    fs_boundary.safe_internal_unlink(item)
             except OSError:
                 pass
 
 
 class VideoTrimWeb:
-    """Holds the pieces one server instance needs: registries, ffmpeg, config."""
+    """Holds the pieces one server instance needs: security, storage, ffmpeg."""
 
-    def __init__(self, registry, allow_remote_files=False, proxy_height=720):
-        self.registry = registry
+    def __init__(self, store, allow_remote_files=False, proxy_height=720,
+                 tunnel_active=False):
+        self.store = store
+        self.settings = SettingsService(store)
+        self.journal = CommitJournal(store)
+        self.registry = MediaRegistry()
         self.jobs = JobRegistry()
+
+        # Ending a session revokes its media tokens, so a token cannot outlive
+        # the authorization that produced it.
+        self.auth = AuthService(store, on_session_end=self.registry.revoke_session)
+
+        self.host_guard = HostAdminGuard(tunnel_active=tunnel_active)
+        self.browse_guard = BrowseGuard(self.host_guard,
+                                        allow_remote_files=allow_remote_files)
+        self.write_policy = WritePolicy(store, self.host_guard)
+        self.output = OutputService(self.settings, self.journal, self.registry)
+
+        self.login_throttle = LoginThrottle()
+        self.access_throttle = AccessRequestThrottle()
+
         self.allow_remote_files = bool(allow_remote_files)
         self.proxy_height = int(proxy_height)
         self.ffmpeg = ffmpeg_tools.find_ffmpeg()
         self.ffprobe = ffmpeg_tools.find_ffprobe()
         self.asset_version = _asset_version()
-        self.local_addresses = _own_addresses()
 
-    # --- helpers -------------------------------------------------------------
-    def require_ffmpeg(self):
-        if not self.ffmpeg:
-            raise HTTPException(status_code=503, detail=ffmpeg_tools.FFMPEG_HELP)
-        return self.ffmpeg
+    # --- request context -----------------------------------------------------
+    @staticmethod
+    def session_for(request):
+        """The session the middleware already resolved. Never re-parsed here."""
+        return request.scope.get("vt_session")
 
-    def is_local(self, request):
-        """True when the request came from the machine running this server.
+    def require_session(self, request):
+        session = self.session_for(request)
+        if session is None:
+            raise HTTPException(status_code=401, detail="Login required")
+        return session
 
-        Loopback is the obvious case. The host's own LAN addresses count too:
-        the banner prints those, so opening that URL *on the host* must not look
-        like a stranger — otherwise the file browser breaks for the one person
-        who is entitled to it.
-        """
-        if self.allow_remote_files:
-            return True
-        client = (request.client.host if request.client else "") or ""
-        if client in _LOOPBACK:
-            return True
-        return client in self.local_addresses
+    def is_host_admin(self, request):
+        return self.host_guard.is_host_request(request)
 
-    def guard_local(self, request):
-        """Reading host paths stays a local-machine privilege.
+    def can_browse(self, request):
+        return self.browse_guard.can_browse_host_paths(request)
 
-        The WebUI itself is served to the whole network by default so that a
-        phone can upload a video, but "open this path" and "list this folder"
-        would hand that network the host's filesystem, so they do not travel.
-        """
-        if self.is_local(request):
+    def guard_browse(self, request):
+        """Reading host paths is a read capability, separate from being the host."""
+        if self.can_browse(request):
             return
         raise HTTPException(
             status_code=403,
             detail=(
                 "Opening files by path is limited to the machine running Video "
-                "Trim. Upload the video instead — it will be trimmed on that "
-                "machine and saved to its Desktop. (Start the server with "
-                "--allow-remote-files to lift this.)"
+                "Trim. Send the video instead — it will be trimmed on that "
+                "machine."
             ),
         )
 
-    def describe(self, path, kind="source"):
-        """Probe a file and hand back everything the player needs to load it."""
+    def require_ffmpeg(self):
+        if not self.ffmpeg:
+            raise HTTPException(status_code=503, detail=ffmpeg_tools.FFMPEG_HELP)
+        return self.ffmpeg
+
+    def require_write(self, request, session):
+        decision = self.write_policy.evaluate(request, session)
+        if not decision.allowed:
+            raise HTTPException(status_code=403, detail=decision.reason)
+        return decision
+
+    # --- media ---------------------------------------------------------------
+    def describe(self, path, session, request, kind="source", capability="upload"):
+        """Probe a file and hand back what the player needs to load it.
+
+        The absolute path is included only for a host-local session. A remote
+        session gets the name and nothing that reveals the host's filesystem.
+        """
         path = Path(path)
         info = ffmpeg_tools.probe_video(path, ffmpeg=self.ffmpeg, ffprobe=self.ffprobe)
-        token = self.registry.add(path, kind=kind)
+        token = self.registry.add(path, kind=kind, session_id=session.id,
+                                  capability=capability)
         friendly = (
             path.suffix.lower() in _FRIENDLY_SUFFIXES
             and (not info.get("codec") or info["codec"] in _FRIENDLY_CODECS)
         )
-        return {
+        host_local = self.is_host_admin(request)
+        payload = {
             "token": token,
             "name": path.name,
-            "path": str(path),
             "duration_ms": info["duration_ms"],
             "fps": info["fps"],
             "width": info["width"],
@@ -192,21 +214,159 @@ class VideoTrimWeb:
             "codec": info.get("codec", ""),
             "media_url": f"/vt/media/{token}",
             "likely_playable": friendly,
-            "output_dir": str(output_dir()),
+            "destination": self.output.destination_for(host_local),
         }
-
-    def publish_saved(self, path):
-        path = Path(path)
-        token = self.registry.add(path, kind="saved")
-        return {
-            "saved_name": path.name,
-            "saved_path": str(path),
-            "saved_dir": str(path.parent),
-            "download_url": f"/vt/saved/{token}",
-        }
+        if host_local:
+            payload["path"] = str(path)
+        return payload
 
 
-# --- routes ------------------------------------------------------------------
+# --- shell routes ------------------------------------------------------------
+def _register_shell_routes(app, state):
+    @app.get("/healthz")
+    def healthz():
+        return {"status": "ok"}
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_view(request: Request):
+        # Already signed in? There is nothing to do here.
+        if state.session_for(request) is not None:
+            return _redirect("/")
+        return HTMLResponse(shell.login_page(state.asset_version))
+
+    @app.post("/api/login")
+    async def login(request: Request):
+        """The one unauthenticated state change in the application.
+
+        Throttling counters live in memory: writing a row per attempt would let
+        anyone who can reach the port drive unbounded disk writes just by
+        guessing. Only aggregates reach SQLite, on transitions worth recording.
+        """
+        address = client_ip(request)
+        key = rate_limit_key(address)
+
+        cooling = state.login_throttle.blocked_for(key)
+        if cooling:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many attempts. Try again in {max(1, cooling // 60)} minute(s).",
+            )
+
+        body = await _body(request)
+        username = str(body.get("username") or "")
+        password = str(body.get("password") or "")
+
+        # Reaching the login endpoint is what earns a permanent row. A passive
+        # connection that never authenticates does not.
+        state.store.ensure_ip(address)
+
+        try:
+            user = state.auth.verify(username, password)
+        except AuthError as exc:
+            _, just_locked = state.login_throttle.record_failure(key)
+            state.store.flush_ip_aggregate(address, requests=1, failures=1)
+            state.store.record_auth_event(address, "locked" if just_locked else "failure")
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        state.login_throttle.record_success(key)
+        now = time.time()
+        state.store.flush_ip_aggregate(address, requests=1, successes=1, last_success=now)
+        state.store.record_auth_event(address, "success")
+
+        host_local = state.is_host_admin(request)
+        token, csrf = state.auth.start_session(
+            user["id"], client_ip=address, host_local=host_local
+        )
+        response = JSONResponse({"status": "ok", "redirect": "/"})
+        _set_session_cookies(request, response, token, csrf)
+        return response
+
+    @app.post("/api/logout")
+    def logout(request: Request):
+        session = state.session_for(request)
+        if session is not None:
+            state.jobs.cancel_for_session(session.id)
+            state.auth.end_session(session.token)
+        response = JSONResponse({"status": "ok", "redirect": "/login"})
+        response.delete_cookie(COOKIE_NAME, path="/")
+        response.delete_cookie(CSRF_COOKIE, path="/")
+        return response
+
+    @app.get("/", response_class=HTMLResponse)
+    def home_view():
+        return HTMLResponse(shell.home_page(state.asset_version))
+
+    @app.get(TRANSFER_ROUTE, response_class=HTMLResponse)
+    def transfer_view():
+        return HTMLResponse(shell.transfer_page(state.asset_version))
+
+    @app.get(shell.SETTINGS_ROUTE, response_class=HTMLResponse)
+    def settings_view(request: Request):
+        # The card is hidden remotely, but hiding is a courtesy — this is the
+        # part that actually refuses.
+        if not state.is_host_admin(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Settings can only be opened on the machine running Video Trim.",
+            )
+        return HTMLResponse(shell.settings_page(state.asset_version))
+
+    @app.get("/vt/api/capabilities")
+    def capabilities(request: Request):
+        session = state.require_session(request)
+        host_admin = state.is_host_admin(request)
+        decision = state.write_policy.evaluate(request, session)
+        pending = 0
+        partials = 0
+        if host_admin:
+            pending = sum(1 for row in state.store.list_ips() if row["access_requested_at"])
+            partials = len(state.journal.survivors())
+        return shell.capabilities(
+            session,
+            host_admin,
+            state.can_browse(request),
+            decision,
+            state.settings,
+            journal=state.journal,
+            pending_requests=pending,
+            partial_notices=partials,
+        )
+
+
+def _set_session_cookies(request, response, token, csrf):
+    """HttpOnly session cookie, plus the readable CSRF companion.
+
+    ``Secure`` is only set when the request actually arrived over HTTPS. Setting
+    it on plain LAN HTTP would silently break login, and claiming a protection
+    the transport does not provide is worse than saying so plainly — which the
+    login page and Settings both do.
+    """
+    secure = request.url.scheme == "https"
+    response.set_cookie(
+        COOKIE_NAME, token, httponly=True, samesite="strict", path="/", secure=secure
+    )
+    response.set_cookie(
+        CSRF_COOKIE, csrf, httponly=False, samesite="strict", path="/", secure=secure
+    )
+
+
+def _redirect(target):
+    return Response(status_code=303, headers={"Location": target})
+
+
+async def _body(request):
+    """Accept JSON or a plain form post, so the login page works without JS."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            return await request.json()
+        except Exception:
+            return {}
+    form = await request.form()
+    return dict(form)
+
+
+# --- Video Trim tool routes --------------------------------------------------
 def _register_routes(app, state):
     @app.get("/vt/static/{name}")
     def static_asset(name: str):
@@ -223,21 +383,33 @@ def _register_routes(app, state):
 
     @app.get("/vt/api/config")
     def config(request: Request):
-        # is_local decides which way the page presents itself: sitting at the
-        # host you get the path box and the folder browser, and from anywhere
-        # else you get upload, because that is all that will work.
+        """What the player needs to decide how to present itself."""
+        session = state.require_session(request)
+        host_local = state.is_host_admin(request)
+        decision = state.write_policy.evaluate(request, session)
         return {
-            "output_dir": str(output_dir()),
             "ffmpeg": bool(state.ffmpeg),
             "ffmpeg_help": ffmpeg_tools.FFMPEG_HELP,
             "video_suffixes": sorted(VIDEO_SUFFIXES),
-            "allow_remote_files": state.allow_remote_files,
-            "is_local": state.is_local(request),
+            "can_browse": state.can_browse(request),
+            "is_host_admin": host_local,
+            "can_write": decision.allowed,
+            "write_reason": decision.reason,
+            "can_request_access": decision.can_request,
+            "destination": state.output.destination_for(host_local),
+            "output_configured": state.output.is_configured(),
         }
 
     @app.api_route("/vt/media/{token}", methods=["GET", "HEAD"])
     def media(token: str, request: Request):
-        path = state.registry.path_for(token)
+        """Serve a token's file — to the session that owns the token, only.
+
+        Ownership rather than unguessability is the check. A token minted by a
+        host-local browse must not be replayable by a remote session that
+        happens to have obtained the string.
+        """
+        session = state.require_session(request)
+        path = state.registry.path_for(token, session.id)
         if path is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
         return file_response(
@@ -248,8 +420,9 @@ def _register_routes(app, state):
 
     @app.api_route("/vt/saved/{token}", methods=["GET", "HEAD"])
     def saved(token: str, request: Request):
-        entry = state.registry.entry_for(token) or {}
-        path = state.registry.path_for(token)
+        session = state.require_session(request)
+        entry = state.registry.entry_for(token, session.id) or {}
+        path = state.registry.path_for(token, session.id)
         if path is None or entry.get("kind") != "saved":
             raise HTTPException(status_code=404, detail="That file is no longer available.")
         return file_response(
@@ -261,7 +434,8 @@ def _register_routes(app, state):
 
     @app.post("/vt/api/open")
     async def open_path(request: Request):
-        state.guard_local(request)
+        session = state.require_session(request)
+        state.guard_browse(request)
         body = await request.json()
         raw = str(body.get("path") or "").strip().strip('"').strip("'")
         if not raw:
@@ -271,12 +445,17 @@ def _register_routes(app, state):
         if not path.is_absolute():
             path = (Path.home() / path).resolve()
         if path.is_dir():
-            raise HTTPException(status_code=400, detail=f"{path} is a folder, not a video file.")
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail=f"{path} does not exist.")
+            raise HTTPException(status_code=400, detail="That is a folder, not a video file.")
 
         try:
-            return state.describe(path)
+            # Opened read-only, and never written back to: source media is
+            # somebody else's file and stays byte-for-byte as it was.
+            path = fs_boundary.validate_external_read(path)
+        except ExternalReadError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        try:
+            return state.describe(path, session, request, capability="host_browse")
         except FFmpegError as exc:
             raise HTTPException(status_code=415, detail=str(exc)) from exc
 
@@ -284,13 +463,14 @@ def _register_routes(app, state):
     async def upload(request: Request, name: str = ""):
         """Take a video from whichever browser is driving, local or not.
 
-        This is the route a remote visitor uses, so it streams the body straight
-        to disk rather than letting the framework buffer a multi-gigabyte file
-        first. The page sends raw bytes with ?name=; a multipart form still works
-        for anything hand-rolled, at the cost of that buffering.
+        Streamed straight to internal staging rather than buffered, because the
+        remote case is a multi-gigabyte file from a phone.
         """
-        multipart = "multipart/form-data" in (request.headers.get("content-type") or "")
+        session = state.require_session(request)
+        state.require_write(request, session)
 
+        multipart = "multipart/form-data" in (request.headers.get("content-type") or "")
+        upload_file = None
         if multipart:
             form = await request.form()
             upload_file = form.get("file")
@@ -308,25 +488,23 @@ def _register_routes(app, state):
         if suffix not in VIDEO_SUFFIXES:
             raise HTTPException(status_code=415, detail=f"{suffix} is not a video container.")
 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        fs_boundary.ensure_internal_dir(UPLOAD_DIR)
         _sweep_cache(keep=state.registry.known_paths())
 
-        # Refuse before writing if it clearly will not fit, rather than filling
-        # the disk and failing at the end of a long upload.
         declared = request.headers.get("content-length")
         if declared and declared.isdigit():
-            free = shutil.disk_usage(UPLOAD_DIR).free
+            import shutil as _shutil
+            free = _shutil.disk_usage(str(UPLOAD_DIR)).free
             if int(declared) + UPLOAD_HEADROOM > free:
                 raise HTTPException(
                     status_code=507,
-                    detail=(
-                        f"That file is {int(declared) / 1e9:.1f} GB and only "
-                        f"{free / 1e9:.1f} GB is free on the machine running "
-                        "Video Trim."
-                    ),
+                    detail="There is not enough free space on the host for that file.",
                 )
 
-        target = unique_path(UPLOAD_DIR / safe)
+        # A fresh per-upload folder, so a staging name can never collide.
+        job_id = state.output.new_job_id()
+        staging = state.output.staging_dir("uploads", job_id)
+        target = staging / safe
         try:
             with open(target, "wb") as handle:
                 if multipart:
@@ -339,27 +517,30 @@ def _register_routes(app, state):
             if target.stat().st_size == 0:
                 raise HTTPException(status_code=400, detail="That upload was empty.")
         except HTTPException:
-            target.unlink(missing_ok=True)
+            state.output.discard_staging("uploads", job_id)
             raise
         except Exception as exc:
-            target.unlink(missing_ok=True)
+            state.output.discard_staging("uploads", job_id)
             raise HTTPException(status_code=500, detail=f"Upload failed: {exc}") from exc
 
         try:
-            return state.describe(target, kind="upload")
+            return state.describe(target, session, request, kind="upload",
+                                  capability="upload")
         except FFmpegError as exc:
-            target.unlink(missing_ok=True)
+            state.output.discard_staging("uploads", job_id)
             raise HTTPException(status_code=415, detail=str(exc)) from exc
 
     @app.get("/vt/api/browse")
     def browse(request: Request, dir: str = ""):
-        """List folders and videos, so the page has the desktop app's Open dialog."""
-        state.guard_local(request)
+        """List folders and videos, so the page has the desktop app's Open dialog.
 
-        if dir:
-            current = Path(os.path.expandvars(dir)).expanduser()
-        else:
-            current = output_dir()
+        Names and safe metadata only, and no write side effects — this route
+        cannot create, modify or remove anything it lists.
+        """
+        state.require_session(request)
+        state.guard_browse(request)
+
+        current = Path(os.path.expandvars(dir)).expanduser() if dir else Path.home()
         try:
             current = current.resolve()
         except OSError:
@@ -370,7 +551,7 @@ def _register_routes(app, state):
         folders, files = [], []
         try:
             for item in sorted(current.iterdir(), key=lambda p: p.name.lower()):
-                if item.name.startswith(".") and item.name != "..":
+                if item.name.startswith("."):
                     continue
                 try:
                     if item.is_dir():
@@ -384,11 +565,13 @@ def _register_routes(app, state):
                 except OSError:
                     continue
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=f"{current} is not readable.") from exc
+            raise HTTPException(status_code=403, detail="That folder is not readable.") from exc
 
         parent = str(current.parent) if current.parent != current else ""
-        shortcuts = [{"name": "Desktop", "path": str(output_dir())},
-                     {"name": "Home", "path": str(Path.home())}]
+        shortcuts = [{"name": "Home", "path": str(Path.home())}]
+        desktop = desktop_dir()
+        if desktop and desktop.is_dir():
+            shortcuts.append({"name": "Desktop", "path": str(desktop)})
         for label in ("Videos", "Movies", "Downloads"):
             candidate = Path.home() / label
             if candidate.is_dir():
@@ -409,30 +592,56 @@ def _register_routes(app, state):
 
     @app.post("/vt/api/screenshot")
     async def screenshot(request: Request):
-        """Full-resolution still, straight to the Desktop, exactly like the app."""
+        """Full-resolution still: rendered internally, then published."""
+        session = state.require_session(request)
+        state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
+
         body = await request.json()
-        source = state.registry.path_for(body.get("token"))
+        source = state.registry.path_for(body.get("token"), session.id)
         if source is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
 
         position = max(0, int(float(body.get("position_ms") or 0)))
-        target = unique_path(output_dir() / frame_name(source, position))
+        job_id = state.output.new_job_id()
+        staging = state.output.staging_dir("exports", job_id)
+        staged = staging / "frame.png"
         try:
-            ffmpeg_tools.extract_frame(ffmpeg, source, target, position)
+            ffmpeg_tools.extract_frame(ffmpeg, source, staged, position)
         except FFmpegError as exc:
-            target.unlink(missing_ok=True)
+            state.output.discard_staging("exports", job_id)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"Could not write {target}: {exc}") from exc
-        return state.publish_saved(target)
+            state.output.discard_staging("exports", job_id)
+            raise HTTPException(status_code=500, detail=f"Could not capture that frame: {exc}") from exc
+
+        try:
+            outcome = state.output.publish(
+                staged,
+                frame_name(source, position),
+                CollisionPolicy.UNIQUE_NEW_NAME,
+                authorize=state.write_policy.authorizer(request, session),
+                job_id=job_id,
+                session=session,
+                host_local=state.is_host_admin(request),
+            )
+        except CommitDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except OutputUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        finally:
+            state.output.discard_staging("exports", job_id)
+        return outcome.as_dict()
 
     @app.post("/vt/api/clip")
     async def clip(request: Request):
         """Start the A-B export. Cut from the original even when a proxy plays."""
+        session = state.require_session(request)
+        state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
+
         body = await request.json()
-        source = state.registry.path_for(body.get("token"))
+        source = state.registry.path_for(body.get("token"), session.id)
         if source is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
 
@@ -443,43 +652,77 @@ def _register_routes(app, state):
         if state.jobs.active("clip"):
             raise HTTPException(status_code=409, detail="An export is already running.")
 
-        target = unique_path(output_dir() / clip_name(source, a_ms, b_ms))
+        # ffmpeg renders into the app's own cache under a per-job folder. It
+        # never names a file in the save folder, which is what closes the old
+        # race between picking a free name and encoding over it.
+        job_id = state.output.new_job_id()
+        staging = state.output.staging_dir("exports", job_id)
+        staged = staging / "clip.mp4"
+        desired = clip_name(source, a_ms, b_ms)
+        host_local = state.is_host_admin(request)
+        authorize = state.write_policy.authorizer(request, session)
+
+        def publish(finished):
+            try:
+                outcome = state.output.publish(
+                    finished.target,
+                    desired,
+                    CollisionPolicy.UNIQUE_NEW_NAME,
+                    authorize=authorize,
+                    job_id=job_id,
+                    session=session,
+                    host_local=host_local,
+                )
+            finally:
+                state.output.discard_staging("exports", job_id)
+            return outcome.as_dict()
+
         job = state.jobs.start(
             "clip",
-            f"Exporting clip → {target.name}",
+            f"Exporting clip → {desired}",
             b_ms - a_ms,
-            ffmpeg_tools.clip_command(ffmpeg, source, target, a_ms, b_ms),
-            target,
-            on_success=lambda finished: state.publish_saved(finished.target),
+            ffmpeg_tools.clip_command(ffmpeg, source, staged, a_ms, b_ms),
+            staged,
+            on_success=publish,
+            owner_session=session.id,
+            owner_ip=session.client_ip,
         )
         return job.snapshot()
 
     @app.post("/vt/api/proxy")
     async def proxy(request: Request):
-        """Transcode a browser-playable preview for a codec the browser refused."""
+        """Transcode a browser-playable preview. Internal, and never an export source."""
+        session = state.require_session(request)
+        state.require_write(request, session)
         ffmpeg = state.require_ffmpeg()
+
         body = await request.json()
         token = body.get("token")
-        source = state.registry.path_for(token)
+        source = state.registry.path_for(token, session.id)
         if source is None:
             raise HTTPException(status_code=404, detail="That video is no longer open.")
 
         info = ffmpeg_tools.probe_video(source, ffmpeg=state.ffmpeg, ffprobe=state.ffprobe)
-        PROXY_DIR.mkdir(parents=True, exist_ok=True)
-        target = PROXY_DIR / f"{sanitize(source.stem)}_{token[:8]}_preview.mp4"
+        fs_boundary.ensure_internal_dir(PROXY_DIR)
+        target = PROXY_DIR / f"{sanitize(source.stem)}_{str(token)[:8]}_preview.mp4"
 
-        if target.is_file() and target.stat().st_size > 0:
-            preview = state.registry.add(target, kind="proxy")
-            return {
-                "id": "cached",
-                "kind": "proxy",
-                "state": "done",
-                "percent": 100,
-                "proxy_url": f"/vt/media/{preview}",
-            }
+        if target.is_file():
+            if target.stat().st_size > 0:
+                preview = state.registry.add(target, kind="proxy",
+                                             session_id=session.id, capability="proxy")
+                return {
+                    "id": "cached",
+                    "kind": "proxy",
+                    "state": "done",
+                    "percent": 100,
+                    "proxy_url": f"/vt/media/{preview}",
+                }
+            # A zero-byte leftover would make ffmpeg's "-n" refuse to run.
+            fs_boundary.safe_internal_unlink(target)
 
         def publish(finished):
-            preview = state.registry.add(finished.target, kind="proxy")
+            preview = state.registry.add(finished.target, kind="proxy",
+                                         session_id=session.id, capability="proxy")
             return {"proxy_url": f"/vt/media/{preview}"}
 
         job = state.jobs.start(
@@ -489,20 +732,24 @@ def _register_routes(app, state):
             ffmpeg_tools.proxy_command(ffmpeg, source, target, state.proxy_height),
             target,
             on_success=publish,
+            owner_session=session.id,
+            owner_ip=session.client_ip,
         )
         return job.snapshot()
 
     @app.get("/vt/api/job/{job_id}")
-    def job_status(job_id: str):
+    def job_status(job_id: str, request: Request):
+        session = state.require_session(request)
         job = state.jobs.get(job_id)
-        if job is None:
+        if job is None or (job.owner_session and job.owner_session != session.id):
             raise HTTPException(status_code=404, detail="No such job.")
         return job.snapshot()
 
     @app.post("/vt/api/job/{job_id}/cancel")
-    def job_cancel(job_id: str):
+    def job_cancel(job_id: str, request: Request):
+        session = state.require_session(request)
         job = state.jobs.get(job_id)
-        if job is None:
+        if job is None or (job.owner_session and job.owner_session != session.id):
             raise HTTPException(status_code=404, detail="No such job.")
         job.cancel()
         return job.snapshot()
@@ -576,9 +823,9 @@ PLAYER_HTML = """
           <button type="button" class="vt-btn vt-btn-ab" data-vt="marker"
                   title="Cycle the A-B markers (B)">A-B</button>
           <button type="button" class="vt-btn" data-vt="clip" data-icon="clip"
-                  title="Save the A-B clip to the Desktop (C)" disabled></button>
+                  title="Save the A-B clip (C)" disabled></button>
           <button type="button" class="vt-btn" data-vt="screenshot" data-icon="camera"
-                  title="Save this frame to the Desktop (S)"></button>
+                  title="Save this frame (S)"></button>
           <button type="button" class="vt-btn" data-vt="mute" data-icon="volumeOn"
                   title="Mute (M)"></button>
           <button type="button" class="vt-btn" data-vt="fullscreen" data-icon="fullscreen"
@@ -625,11 +872,11 @@ screenshot &middot; `C` save the A-B clip &middot; `F`/`F11` fullscreen &middot;
 clears both. Once both exist the range is the whole world: seeks and the ±5s
 skips clamp inside it, **Stop** returns to A, and **Repeat** wraps B back to A.
 
-**Saving** — both outputs are written by ffmpeg on the machine running this
-server, to that machine's Desktop, auto-named from the source and timecode and
-never overwriting. Clips are cut from the *original* file even when a
-browser-friendly preview is what's playing, so quality never comes from the
-preview.
+**Saving** — both outputs are rendered by ffmpeg on the machine running this
+server, into that machine's own working folder, and then copied into the save
+folder the host chose. Existing files there are never replaced: a clip that would
+collide gets a new name of its own. Clips are cut from the *original* file even
+when a browser-friendly preview is what's playing.
 """
 
 
@@ -646,25 +893,27 @@ def _bootstrap_js(version):
       root.classList.add("dark");
       document.documentElement.classList.add("dark");
       const reveal = () => document.documentElement.classList.add("vt-ready");
-      if (!document.getElementById("vt-css")) {
-        const link = document.createElement("link");
-        link.id = "vt-css";
-        link.rel = "stylesheet";
-        link.href = "/vt/static/player.css?v=" + v;
-        link.onload = reveal;
-        link.onerror = reveal;
-        document.head.appendChild(link);
+      const add = (id, tag, attrs) => {
+        if (document.getElementById(id)) return false;
+        const node = document.createElement(tag);
+        node.id = id;
+        Object.keys(attrs).forEach((key) => { node[key] = attrs[key]; });
+        document.head.appendChild(node);
+        return true;
+      };
+      add("vt-shell-css", "link", { rel: "stylesheet", href: "/vt/static/shell.css?v=" + v });
+      // Brings the shared header behaviour (Home, Sign out) into the tool.
+      add("vt-shell-js", "script", { src: "/vt/static/shell.js?v=" + v, defer: true });
+      if (!add("vt-css", "link", {
+            rel: "stylesheet", href: "/vt/static/player.css?v=" + v,
+            onload: reveal, onerror: reveal })) {
+        reveal();
+      } else {
         // Never leave the player hidden because a stylesheet stalled.
         setTimeout(reveal, 4000);
-      } else {
-        reveal();
       }
-      if (!document.getElementById("vt-js")) {
-        const script = document.createElement("script");
-        script.id = "vt-js";
-        script.src = "/vt/static/player.js?v=" + v;
-        document.head.appendChild(script);
-      } else if (window.VideoTrim) {
+      if (!add("vt-js", "script", { src: "/vt/static/player.js?v=" + v })
+          && window.VideoTrim) {
         window.VideoTrim.mount();
       }
       return [];
@@ -673,24 +922,28 @@ def _bootstrap_js(version):
 
 
 def build_blocks(state):
-    """The Gradio page. Every control hands off to the player through JS, so no
-    Python callback sits between a click and the routes above."""
+    """The Video Trim tool's page. Every control hands off to the player through
+    JS, so no Python callback sits between a click and the routes above."""
     with gr.Blocks(title="Video Trim", analytics_enabled=False, fill_width=True) as demo:
         gr.HTML(
+            '<header class="vt-header vt-header-tool">'
+            '<a class="vt-home-link" href="/" aria-label="Back to Home">'
+            '<span class="vt-home-icon" aria-hidden="true"></span><span>Home</span></a>'
+            '<span class="vt-header-title">Video Trim</span>'
+            '<button type="button" class="vt-signout" id="vt-signout">Sign out</button>'
+            "</header>"
             "<div id='vt-head'>"
-            "<h1>Video Trim</h1>"
             "<p>Mark a VLC-style A-B loop, watch it repeat, then export that exact "
-            "span as a clip or grab a full-resolution still — both straight to "
-            f"<code>{output_dir()}</code> on the machine running this server.</p>"
+            "span as a clip or grab a full-resolution still.</p>"
             "</div>"
         )
 
-        # Hidden by the player for visitors from other machines, who cannot use
-        # either control — see applyReach() in player.js.
+        # Hidden by the player for visitors who cannot read host paths — see
+        # applyReach() in player.js.
         with gr.Row(equal_height=True, elem_id="vt-source-row"):
             path_box = gr.Textbox(
                 label="Video on the host machine",
-                placeholder=r"C:\Users\you\Videos\clip.mp4   —   paste a path and press Enter",
+                placeholder="paste a path and press Enter",
                 lines=1,
                 scale=8,
                 container=True,
@@ -702,10 +955,10 @@ def build_blocks(state):
 
         if not state.ffmpeg:
             gr.Markdown(
-                "> **ffmpeg was not found.** Playback still works, but clips and "
-                "stills cannot be written. Install it with `pip install "
-                "imageio-ffmpeg` inside the venv, or put `ffmpeg` on PATH, then "
-                "restart."
+                "> **ffmpeg was not found inside this installation.** Playback still "
+                "works, but clips and stills cannot be written. Install it with "
+                "`pip install imageio-ffmpeg` inside the venv and restart. Video Trim "
+                "deliberately will not run an ffmpeg found on the system PATH."
             )
 
         with gr.Accordion("Controls, shortcuts and where files land", open=False):
@@ -731,32 +984,42 @@ def _filtered(func, wanted):
     return {key: value for key, value in wanted.items() if key in allowed}
 
 
-def create_app(allow_remote_files=False, proxy_height=720):
-    """Build the FastAPI app with the Gradio UI mounted at the root."""
-    from .media import MediaRegistry
+def create_app(allow_remote_files=False, proxy_height=720, store=None,
+               tunnel_active=False):
+    """Build the application: FastAPI routes, the Gradio tool, then the guard."""
+    # Pinned before Gradio is touched, so its own temp handling stays inside the
+    # install root rather than landing in the system temp directory.
+    fs_boundary.ensure_internal_dir(GRADIO_TEMP)
+    os.environ["GRADIO_TEMP_DIR"] = str(GRADIO_TEMP)
 
     _sweep_cache()
     state = VideoTrimWeb(
-        MediaRegistry(),
+        store or Store(),
         allow_remote_files=allow_remote_files,
         proxy_height=proxy_height,
+        tunnel_active=tunnel_active,
     )
+    state.auth.purge_expired()
 
     app = FastAPI(title="Video Trim", docs_url=None, redoc_url=None)
 
     @app.exception_handler(HTTPException)
     async def http_error(_request, exc):
-        # The player shows `detail` verbatim in its toast, so keep it human.
+        # The player shows `detail` verbatim in its toast, so keep it human —
+        # and free of host paths, which the callers above are careful about.
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
-    # Registered before the Gradio mount so /vt/* is not swallowed by it.
+    # Registered before the Gradio mount so these are not swallowed by it.
+    _register_shell_routes(app, state)
     _register_routes(app, state)
+    register_transfer_routes(app, state)
+    register_admin_routes(app, state)
 
     demo = build_blocks(state)
     app = gr.mount_gradio_app(
         app,
         demo,
-        path="/",
+        path=VIDEO_TRIM_ROUTE,
         **_filtered(gr.mount_gradio_app, {
             "ssr_mode": False,
             "show_error": True,
@@ -765,5 +1028,12 @@ def create_app(allow_remote_files=False, proxy_height=720):
             "max_file_size": None,
         }),
     )
+
+    # Applied to the OUTER app, after the mount, on purpose. Gradio contributes
+    # routes this codebase does not author — /gradio_api/file/..., /upload,
+    # /queue/join, /config, /info, theme assets — and wrapping the inner app
+    # before mounting would leave every one of them reachable.
+    guarded = AuthenticationMiddleware(app, state.auth, state.host_guard, state.store)
+    guarded.state = app.state
     app.state.video_trim = state
-    return app
+    return guarded

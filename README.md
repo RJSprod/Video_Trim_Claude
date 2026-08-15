@@ -1,24 +1,86 @@
 # Video Trim
 
-A touch-friendly video player built for pulling media *out* of video files: mark a
-VLC-style A-B loop, watch it repeat, then export that exact span as a clip or grab
-a full-resolution still — both straight to your Desktop.
+A touch-friendly media app for your own machine and the devices around it. Sign
+in, and Home offers the tools:
 
-The window is the video. Controls float on top as a frosted glass panel that blurs
-the live frame behind it, and get out of the way when you're watching.
+- **Video Trim** — mark a VLC-style A-B loop, watch it repeat, then save that
+  exact span as a clip or grab a full-resolution still.
+- **Media Transfer** — send photos and videos from a phone or laptop to the
+  host's save folder.
+- **Settings** — account, save location, and which devices may write to this
+  machine. Host-only, and only shown on the host.
+
+Controls float on translucent glass that blurs what is behind them, sized for
+thumbs, and get out of the way when you're watching.
 
 It comes two ways, sharing one engine:
 
 | | |
 | --- | --- |
-| **WebUI** | A Gradio app in your browser on **port 7862**, reachable from your other devices out of the box. One-click install into a local `venv`. |
+| **Web app** | In your browser on **port 7862**, reachable from your other devices. One-click install into a local `venv`. |
 | **Desktop app** | The original PySide6 window. `python app.py` |
 
-Both cut clips with the same ffmpeg command and write to the same Desktop.
+Both cut clips with the same ffmpeg command, and both save through the same
+create-only gateway described under [What it protects](#what-it-protects).
 
 ---
 
-# The WebUI
+# What it protects
+
+Video Trim treats everything outside its own install directory as somebody
+else's data. Outside that directory it can:
+
+- **read** files you explicitly pick, and list folder names;
+- **create brand-new files** in the one save folder you chose.
+
+That is the entire list. It cannot modify, overwrite, truncate, append to,
+rename, move, delete or execute any file that was already on your machine. Not
+with a flag, not as an administrator, not through any setting — those rules sit
+above every feature and no permission can widen them.
+
+Concretely:
+
+- Renders go into the app's own `cache/`, never straight into your save folder,
+  so ffmpeg is never pointed at a file of yours.
+- The final copy uses an **exclusive create** anchored to a directory handle. If
+  the name is taken, the create fails — there is no "check, then write" window
+  in which the answer could change.
+- A save folder that overlaps the install directory is refused, because the
+  app's own cleanup would then be able to delete your saved files.
+- Filenames are **rejected**, not quietly rewritten: path separators, control
+  characters, colons (an NTFS alternate data stream would otherwise modify an
+  existing file straight through the approved path), Windows device names like
+  `CON.mp4`, trailing dots and spaces.
+- ffmpeg is only ever run from inside this installation — never from your
+  `PATH` — with `shell=False` and `-protocol_whitelist file,pipe`, so a crafted
+  video cannot make it read other files or reach the network.
+
+There is exactly one place in the codebase that can remove an external file: the
+save routine's own failure path, and only when it still holds the descriptor for
+a file **it created seconds ago and never finished writing**. A file that
+survives a crash is reported to you in Settings and never touched. `python
+security/check_fs_calls.py` proves those statements against the source on every
+commit.
+
+## What it does not protect against
+
+- **Traffic on your network.** Over plain HTTP the session cookie travels in the
+  clear, and anyone able to capture traffic on the network segment can take over
+  a session. `HttpOnly` and `SameSite` do nothing about a passive sniffer. Put it
+  behind HTTPS via a reverse proxy if that matters to you.
+- **Device identity.** Write permission follows an *IP address*. If DHCP moves a
+  device to a new address it needs allowing again, and devices behind one NAT
+  address share one permission. It is LAN convenience control, not device
+  authentication.
+- **A compromised host.** Everything above is enforced by this application.
+  Malware already running as your user is not constrained by it.
+- **Whoever is sitting at the machine.** Host-local access is trusted by design.
+- **Bugs in ffmpeg, Gradio, uvicorn or your OS.** The architecture keeps the
+  reachable surface small; it does not patch dependencies.
+
+---
+
+# The web app
 
 ## One-click install
 
@@ -38,14 +100,20 @@ It is reachable from your other devices out of the box — no flags. The launche
 prints the address to use:
 
 ```
-  Video Trim WebUI
+  Video Trim
   ├─ on this machine   http://127.0.0.1:7862
   ├─ from elsewhere    http://192.168.1.42:7862
-  ├─ saving to         C:\Users\you\Desktop
+  ├─                   …everyone must sign in, and a new device cannot save
+  ├─                   anything until you allow its address in Settings.
+  ├─ saving to         C:\Users\you\Pictures\Video Trim
+  └─ note              Video Trim protects against other people on your network
+                       using the app. It does not protect against someone who
+                       can capture traffic on your network.
 ```
 
-Open that second URL on a phone or laptop, upload a video, mark the A-B loop, and
-the clip lands on the **host's** Desktop — the machine running the launcher. See
+Open that second URL on a phone or laptop and sign in. Marking an A-B loop and
+saving a clip puts it in the **host's** save folder — the machine running the
+launcher — once you have allowed that device. See
 [From another machine](#from-another-machine) for what that does and doesn't allow.
 
 Nothing is installed system-wide and nothing is written outside this folder, so
@@ -55,9 +123,15 @@ on `PATH`; the launcher checks and tells you where to get it if not.
 ```
 Video_Trim_Claude/
   venv/            every dependency lives here          (created for you)
-  cache/           uploads and transcoded previews      (created for you)
+  data/            credentials, settings, IP history    (created for you)
+  cache/           uploads, staging, transcoded previews (created for you)
   CMD_FLAGS.txt    flags applied to every launch
 ```
+
+`data/` deliberately sits outside `venv/`, so `--recreate` rebuilds the
+dependencies without losing your login, your save location or your allowed
+devices. Never put a password in `CMD_FLAGS.txt` — it is plain text, and Video
+Trim does not read credentials from it.
 
 To reinstall dependencies after pulling new code, run `update_wizard_windows.bat`
 (or `./update_wizard_linux.sh`, `./update_wizard_macos.sh`). Add `--recreate` to
@@ -65,7 +139,7 @@ throw the venv away and build it from scratch.
 
 ## Port 7862
 
-The WebUI is served on **port 7862** on every interface, and that port is treated
+The app is served on **port 7862** on every interface, and that port is treated
 as reserved: if something else already holds it, the launcher stops and tells you
 what to look for rather than quietly moving to 7863 and leaving you on a dead URL.
 Pass `--any-port` if you would rather it take the next free one.
@@ -80,12 +154,14 @@ Put them after the launcher (`./start_linux.sh --local-only`) or one per line in
 | `--local-only` | Bind `127.0.0.1` only, so nothing outside this machine can reach it. |
 | `--listen-port 7862` | Serve on a different port. |
 | `--listen-host 192.168.1.5` | Bind one specific interface. |
-| `--share` | Also expose a temporary public `gradio.live` URL. |
+| `--output-dir <folder>` | Set the save folder. Must already exist, and must sit outside this installation. Stored, so it is only needed once. |
+| `--share` | Also expose a temporary public `gradio.live` URL. Host Settings are hidden while a tunnel is up, because tunnelled traffic cannot be told apart from this machine's own. |
 | `--no-browser` | Don't open a browser window on start. |
 | `--any-port` | Use the next free port instead of stopping when 7862 is busy. |
-| `--allow-remote-files` | Also let visitors from other machines browse paths on **this** machine. |
+| `--allow-remote-files` | Also let signed-in visitors from other machines browse paths on **this** machine. Reading only — never Settings, credentials, the save location, or write permission. |
 | `--proxy-height 720` | Height of the preview built for codecs the browser can't play. |
 | `--update` / `--recreate` / `--desktop` | Installer actions — see below. |
+| `--change-auth` | Set a new username and password, then exit. |
 
 ## Opening a video
 
@@ -93,40 +169,84 @@ Three ways, all landing in the same player:
 
 - **Paste a path** into the box at the top and press Enter — a path on the machine
   running the server. Nothing is copied, so this is instant even for a 4K file.
-- **Browse…** opens a file picker that walks that machine's folders, the WebUI's
+- **Browse…** opens a file picker that walks that machine's folders, the web app's
   stand-in for the desktop app's Open dialog.
 - **Drag a file onto the player**, or click *Choose a video…*. This sends the file
   to the host, so prefer a path when you're sitting at the host anyway.
 
+## Signing in
+
+Setup asks for a username and password before it will start anything, and there
+is no way to run without them. They are stored in `data/app.db` as an Argon2id
+hash — never in plain text, never in `CMD_FLAGS.txt`, never in a log line — and
+they survive updates and `--recreate`. To change them later:
+
+```
+python one_click.py --change-auth
+```
+
+Everything except the login page itself requires a session. That is enforced by
+one guard wrapped around the whole application rather than route by route, so
+the pages Gradio contributes are covered by the same rule as ours; there is a
+test that fails the build if one of them ever becomes reachable.
+
+Changing your password signs every other device out immediately.
+
 ## From another machine
 
-The WebUI is served to your whole network by default, so a phone, tablet or
-laptop can open it and work without anyone passing a flag. What changes for a
-visitor who isn't at the host:
+The app is served to your whole network by default, so a phone, tablet or laptop
+can open it. What a visitor gets is deliberately narrow:
 
-- **Upload is the way in.** The page notices and reshapes itself — the host path
-  box and the folder browser disappear, and *Choose a video…* plus drag-and-drop
-  become the primary action. The file streams straight to disk on the host rather
-  than being buffered in memory, so a multi-gigabyte upload is fine, and the
-  progress percentage is the real transfer.
-- **Saving does not change.** ffmpeg runs on the host, so the clip and the still
-  are written to the **host's** Desktop, exactly as if you were sitting at it.
-  Each one is also offered as a download link under the video, so you can pull a
-  copy back to the device you're holding.
+- **They must sign in.** Failed attempts are throttled per address, and the app
+  never says whether a username exists.
+- **A new device cannot write anything.** Sign-in is not permission. Uploading,
+  trimming and transferring all need the host to allow that device's address,
+  from the host. Until then the device sees *"File transfer disabled by host"*
+  and a **Request access** button, which sets a flag the host sees in Settings
+  and grants nothing by itself. There is no remote approval path.
+- **They never learn a path on your machine.** Where files land is shown as a
+  name you choose ("the host's save folder" by default). No response body, error
+  message, toast, tooltip or job label carries a host path, drive letter or
+  username to a device that isn't the host.
 - **Reading paths on the host does not travel.** "Open this path" and "list this
-  folder" are refused for anyone but the machine running the server, so exposing
-  the WebUI doesn't expose its filesystem. Opening the LAN URL *on the host*
-  still counts as local — the host's own addresses are recognised.
+  folder" are refused for anyone but the machine running the server. Opening the
+  LAN URL *on the host* still counts as local — the host's own addresses are
+  recognised. `--allow-remote-files` lifts that for reading and **only** reading:
+  it never grants Settings, credentials, the save location, write permission, or
+  access to media somebody else opened.
 
-So the exposure is: anyone who can reach the address can upload a video, trim it,
-and cause files to be written to the host's Desktop. On a home or office network
-that is the point. If you'd rather not, `--local-only` restores loopback-only
-binding, and `--allow-remote-files` goes the other way and lets remote visitors
-browse the host's filesystem too.
+To allow a device, open **Settings → Connected devices** on the host. Pending
+requests are pinned at the top with the address, the username that signed in and
+the time, so you can match it to the phone in your hand. The switch takes effect
+on the next request — no restart. Turning it off cancels that device's in-flight
+work.
+
+`--local-only` restores loopback-only binding if you would rather nothing else
+could reach it at all.
 
 Uploads are kept in `cache/uploads` and swept when they are over a day old
 (anything still open in a session is never swept). An upload is refused up front
 if it clearly won't fit in the host's free disk space.
+
+## Media Transfer
+
+Home → **Media Transfer** sends photos and videos from the device you are
+holding to the host's save folder. Files stream to the host rather than being
+buffered in memory, so a multi-gigabyte video is fine.
+
+Progress is reported in two phases on purpose — *Sending* and then *Finalizing*
+— because the upload finishing is not the same as the file being saved.
+
+**A name that already exists is skipped.** Nothing is replaced and no
+`name (2).jpg` is invented; you get *"Already exists — skipped"* and the file
+you already had is untouched. (Generated Video Trim clips do get a new name
+instead, because those are output the app made up rather than a file you named.)
+
+One consequence worth stating: a device you have allowed can learn which
+filenames exist in the save folder by trying them and reading the answer. It is
+signed in, you approved it, and the folder is the one you designated to receive
+its files — so this is accepted rather than papered over with vague errors that
+would make legitimate skips unreadable.
 
 ## Codecs the browser can't play
 
@@ -142,7 +262,7 @@ transcode.
 
 ## Also installing the desktop app
 
-The WebUI venv deliberately doesn't include PySide6 — it's a large download the
+The web app's venv deliberately doesn't include PySide6 — it's a large download the
 browser build never uses. To get both in one venv:
 
 ```
@@ -178,14 +298,14 @@ Optionally open a file straight away:
 python app.py "C:\Users\you\Videos\clip.mp4"
 ```
 
-The WebUI takes the same argument: `python webui.py "C:\...\clip.mp4"` opens the
+The web app takes the same argument: `python webui.py "C:\...\clip.mp4"` opens the
 browser straight into that file.
 
 ---
 
 # Using it
 
-Everything below is true of both front ends: the WebUI reproduces the desktop
+Everything below is true of both front ends: the web app reproduces the desktop
 app's control bar, gestures, keyboard map and A-B rules rather than inventing its
 own.
 
@@ -205,14 +325,14 @@ The bar along the bottom, left to right:
 | » 5 | Forward 5 seconds. |
 | ⟳ Repeat | Loop the A-B range, or the whole file when no range is set. |
 | **A-B** | Cycles the loop markers — see below. |
-| ⭳ Save clip | Exports the current A-B range to the Desktop. Disabled until both markers exist. |
-| ⛶ Screenshot | Saves the frame on screen to the Desktop as a PNG. |
+| ⭳ Save clip | Saves the current A-B range to the host's save folder. Disabled until both markers exist. |
+| ⛶ Screenshot | Saves the frame on screen there as a PNG. |
 | 🔊 Mute | Toggles audio. |
 | 🗀 Open | Open a different video without leaving the session. |
 
 You can also drag a video file onto the window at any time.
 
-In the WebUI the same bar sits over the video as a real backdrop-blurred panel,
+In the web app the same bar sits over the video as a real backdrop-blurred panel,
 and 🗀 Open opens the host file picker described above.
 
 ### A-B looping
@@ -289,20 +409,39 @@ the controls never auto-hide at all.
 
 ---
 
-## What lands on your Desktop
+## Where saves go
 
-Both outputs are auto-named from the source file and the timecode, and never
-overwrite — a repeat save becomes `… (2)`. OneDrive-redirected Desktops are
-resolved through the Windows known-folder API, so files land where your Desktop
-actually is; on Linux the localised `XDG_DESKTOP_DIR` is honoured.
+You choose the folder, and there is no default. Open **Settings → Save location**
+on the host and pick one, or pass `--output-dir <folder>` once and it is stored.
 
-**In the WebUI, "your Desktop" always means the Desktop of the machine running the
-server**, because ffmpeg runs there — the browser only drives the UI. That holds
-however you got there: open it locally and it's your own Desktop; upload from a
-phone across the network and the clip still lands on the host's Desktop, with a
-download link offered under the video if you want a copy on the phone too. If the
-host has no Desktop at all (a headless box), set `VIDEOTRIM_OUTPUT_DIR` to choose
-where saves go.
+Three things follow from that, and all three are deliberate:
+
+- The folder **must already exist**. Video Trim never creates a folder outside
+  its own directory.
+- If it later disappears — an unmounted drive, a renamed folder — saving fails
+  and says so. It never quietly falls back to your Desktop or your home folder.
+- It **cannot be inside the Video Trim installation**. Choosing one gets you
+  *"That folder is inside the Video Trim installation. Choose a folder outside
+  it, so the app's own cleanup can never touch your saved files."*
+
+> **Upgrading?** Saves used to go to your Desktop automatically. They no longer
+> do, and the desktop app reads the same setting — so both refuse to export
+> until you have chosen a folder once. This is a one-time step, not a bug.
+
+Outputs are auto-named from the source file and the timecode, and **never
+overwrite**: if the generated name is taken, the app creates `… (2)` instead of
+touching what is there.
+
+Files land on the machine running the server, because that is where ffmpeg runs
+— the browser only drives the UI. Open it on your own machine and that is your
+folder; save from a phone across the network and it still lands on the host,
+with a download link offered under the video if you want a copy on the phone.
+The host sees the real path; other devices see the name you chose for it.
+
+If a save is interrupted mid-copy, the app removes the file it was writing — but
+only while it can still prove it created it. After a crash it cannot prove that,
+so the file stays, and **Settings → Maintenance notices** tells you the name so
+you can check it yourself. Video Trim will not delete, repair or overwrite it.
 
 ```
 MyVideo_clip_01m23.4s_to_01m45.9s.mp4
@@ -319,7 +458,7 @@ same job as one cut in the window.
 
 **Screenshots** are the source frame at native resolution — a still from a 4K video
 is 3840×2160 no matter how small the window is — with no controls baked in. The
-desktop app saves the frame it already decoded; the WebUI asks ffmpeg for the frame
+desktop app saves the frame it already decoded; the web app asks ffmpeg for the frame
 at that timestamp, which is the same pixels at the same size.
 
 ---
@@ -328,17 +467,33 @@ at that timestamp, which is the same pixels at the same size.
 
 ```
 app.py               desktop entry point
-webui.py             WebUI entry point — argument parsing, port 7862, uvicorn
+webui.py             web app entry point — argument parsing, port 7862, uvicorn
 one_click.py         builds venv/ and launches; the launchers all call this
 start_*.sh|bat       one-click launchers per platform
 update_wizard_*      reinstall dependencies into the existing venv
 CMD_FLAGS.txt        flags applied to every launch
 
+security/
+  fs_allowlist.toml  every mutating filesystem call, with a justification
+  check_fs_calls.py  CI gate — fails the build on any call not listed
+tests/security/      the P0 suites and their fixture host tree
+
 videotrim/
+  ── the host-protection layer, used by both front ends ──
+  security/fs_boundary.py   read / create-only policy, the exclusive-create
+                            gateway, the name sanitizer, zone separation
+  security/auth.py          Argon2id credentials, sessions, CSRF
+  security/network.py       IP normalisation; host-admin vs browse capability
+  security/write_policy.py  per-IP write authorization
+  security/middleware.py    the default-deny guard around the whole app
+  config/store.py           data/app.db — credentials, settings, IP history,
+                            and the interrupted-run journal
+  config/settings.py        typed settings, including the save location
+
   ── shared by both front ends, no Qt imports ──
   ffmpeg_tools.py    ffmpeg discovery, probing, clip/still/preview commands
   naming.py          output filenames
-  paths.py           Desktop resolution, filename safety
+  paths.py           name formatting (no longer a security boundary)
   timefmt.py         time formatting
 
   ── desktop app ──
@@ -351,22 +506,33 @@ videotrim/
   exporter.py        QThread wrapper around the shared ffmpeg commands
   theme.py           palette and metrics (Qt colours only)
 
-  ── WebUI ──
-  web/server.py      Gradio page + the /vt routes it talks to
-  web/media.py       token registry and Range-aware streaming
+  ── web app ──
+  web/server.py      routes, the Gradio mount, and the guard around both
+  web/shell.py       tool registry, capabilities, and the pages
+  web/transfer.py    Media Transfer
+  web/admin.py       host-only Settings
+  web/output.py      the single way anything leaves this process
+  web/media.py       session-scoped token registry, Range-aware streaming
   web/jobs.py        background ffmpeg jobs with pollable progress
-  web/assets/        player.js and player.css — the browser player
+  web/assets/        login.*, shell.* and player.* — the browser front end
 ```
 
 In the desktop app, playback state lives in `player.py` and the UI observes it
 through signals, so new controls generally mean adding a button in `controls.py`
 and a method in `player.py`.
 
-The WebUI is the same shape with the seam moved: `player.js` owns the A-B rules
-(a direct port of `player.py`'s), Gradio provides the page and the source toolbar,
-and the `/vt` routes do the work only the host can do — reading files, running
-ffmpeg, writing to the Desktop. Because both front ends call into
-`ffmpeg_tools.py`, changing how a clip is cut changes it in both.
+The web app is the same shape with the seam moved: `player.js` owns the A-B rules
+(a direct port of `player.py`'s), Gradio provides the tool page and the source
+toolbar, and the `/vt` routes do the work only the host can do — reading files
+and running ffmpeg. Because both front ends call into `ffmpeg_tools.py`, changing
+how a clip is cut changes it in both.
+
+Feature code never touches the host filesystem directly. It renders into
+`cache/` and calls `web/output.py`, which is the only caller of the gateway in
+`security/fs_boundary.py`. That is what makes the promise checkable rather than
+a matter of everyone remembering: `security/check_fs_calls.py` walks the source
+and fails on any mutating call that is not accounted for, including a second
+external delete appearing anywhere.
 
 ## Notes
 
@@ -376,13 +542,26 @@ ffmpeg, writing to the Desktop. Because both front ends call into
   1080p is comfortable, very high-bitrate 4K may drop frames on a slow machine.
   Codec support comes from Qt Multimedia's bundled FFmpeg backend, so the common
   formats (MP4/MKV/MOV/AVI/WebM, H.264/HEVC/VP9/AV1) play without a codec pack.
-- **WebUI:** decoding is the browser's, which is narrower — hence the preview
+- **Web app:** decoding is the browser's, which is narrower — hence the preview
   transcode for files it won't take. Video is streamed with byte-range requests so
   scrubbing a large file doesn't wait on a download, and files are addressed by
-  opaque token rather than by path, so the only things reachable over HTTP are the
-  ones you opened. It binds every interface by default so other devices can upload;
-  the routes that read host paths check the requesting address and refuse anything
+  opaque token rather than by path. Each token belongs to the session that made
+  it: two people opening the same file get two tokens, and a token dies with its
+  session, so one cannot be replayed by another device to read something you
+  opened. It binds every interface by default so other devices can reach it; the
+  routes that read host paths check the requesting address and refuse anything
   that isn't the host itself.
-- Built and tested on Python 3.11, with PySide6 6.11 and Gradio 6. The WebUI keeps
+- **Running the checks:**
+
+  ```
+  python security/check_fs_calls.py     # the static review gate
+  python -m pytest tests/security -q    # the P0 suites
+  ```
+
+  Both also run in CI. The suites build a fake install root next to a tree of
+  host files, record their hashes and metadata, and assert after every success,
+  failure, cancellation, duplicate, race and malicious name that those files are
+  byte-for-byte and stat-for-stat identical.
+- Built and tested on Python 3.11, with PySide6 6.11 and Gradio 6. The web app keeps
   to long-stable Gradio API (`Blocks`, `HTML`, event `js=`, `mount_gradio_app`) and
   pins `gradio>=4.44,<7`.

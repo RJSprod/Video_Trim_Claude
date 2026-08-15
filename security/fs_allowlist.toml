@@ -1,0 +1,129 @@
+# Every mutating filesystem call and every subprocess call in this codebase.
+#
+# The scanner in security/check_fs_calls.py fails the build on any hit that is
+# not listed here, so adding one is a reviewable diff rather than something a
+# reviewer has to remember to look for. Each entry is keyed by file + symbol and
+# carries a one-line justification and a category:
+#
+#   internal    the target is verified to be inside the install root
+#   gateway     the audited exclusive-create output gateway
+#   cleanup     the single unpublished-creation cleanup call
+#   naming      no filesystem effect (string handling only)
+#
+# Exactly one entry may carry category = "cleanup". That is asserted by the
+# scanner, because "how many places can delete an external file?" must have a
+# checkable answer, and the answer is one.
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "os.open"
+category = "gateway"
+why = "The exclusive create itself: O_CREAT|O_EXCL|O_NOFOLLOW anchored to the output root's own directory handle, plus the O_RDONLY|O_DIRECTORY open of that root."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "os.write"
+category = "gateway"
+why = "Streams the staged bytes into the file the gateway just created and holds open."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "os.unlink"
+category = "cleanup"
+why = "UNPUBLISHED-CREATION CLEANUP. Reached only from _stream_and_publish's failure path, only via _unlink_created, and only when the descriptor is still held, fstat st_dev/st_ino still match, the commit never published, and the unlink goes through the same dir_fd used to create."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "shutil.rmtree"
+category = "internal"
+why = "safe_internal_rmtree; require_internal() proves the target resolves inside the install root, and the root itself is refused."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "target.unlink"
+category = "internal"
+why = "safe_internal_unlink; require_internal() proves the target resolves inside the install root before this line runs."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "mkdir"
+category = "internal"
+why = "ensure_internal_dir; refuses any path that does not resolve inside the install root."
+
+[[entry]]
+file = "videotrim/security/fs_boundary.py"
+symbol = "chmod"
+category = "internal"
+why = "Owner-only permissions on internal working directories only, behind the same containment check."
+
+[[entry]]
+file = "videotrim/config/store.py"
+symbol = "os.chmod"
+category = "internal"
+why = "0600 on data/app.db, which is inside the install root by construction."
+
+[[entry]]
+file = "videotrim/web/server.py"
+symbol = "open"
+category = "internal"
+why = "Writes an upload into cache/uploads/<job>/, created by ensure_internal_dir."
+
+[[entry]]
+file = "videotrim/web/server.py"
+symbol = "handle.write"
+category = "internal"
+why = "Writes upload chunks into the handle opened above, on the same cache/uploads/<job>/ path."
+
+[[entry]]
+file = "videotrim/web/transfer.py"
+symbol = "open"
+category = "internal"
+why = "Streams an incoming transfer into cache/transfers/<job>/, created by ensure_internal_dir."
+
+[[entry]]
+file = "videotrim/web/transfer.py"
+symbol = "handle.write"
+category = "internal"
+why = "Writes transfer chunks into the handle opened above, on the same internal staging path."
+
+[[entry]]
+file = "videotrim/ffmpeg_tools.py"
+symbol = "subprocess"
+category = "internal"
+why = "subprocess.run and Popen for ffmpeg/ffprobe. shell=False, argument lists, stdin disabled, and verify_executable() re-proves the binary resolves inside the install root immediately before the call."
+
+[[entry]]
+file = "videotrim/exporter.py"
+symbol = "subprocess"
+category = "internal"
+why = "The desktop clip encoder. Same verify_executable() check, same shell=False, and its target is require_internal()-checked staging."
+
+[[entry]]
+file = "videotrim/exporter.py"
+symbol = "image.save"
+category = "internal"
+why = "QImage.save writes the still into cache/exports/<job>/ and never to an external path; publication is a separate gateway call."
+
+[[entry]]
+file = "one_click.py"
+symbol = "shutil.rmtree"
+category = "internal"
+why = "Removes venv/ during --recreate. Inside the install root, and deliberately not widened to data/."
+
+[[entry]]
+file = "one_click.py"
+symbol = "subprocess"
+category = "internal"
+why = "Setup/update path: creates the venv and runs pip and the credential helper. Not reachable from the WebUI."
+
+[[entry]]
+file = "one_click.py"
+symbol = "write_text"
+category = "internal"
+why = "The install state file inside venv/."
+
+[[entry]]
+file = "webui.py"
+symbol = "os.chmod"
+category = "internal"
+why = "Re-applies 0700/0600 to data/ and data/app.db at startup."
