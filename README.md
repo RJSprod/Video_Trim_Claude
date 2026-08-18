@@ -7,6 +7,9 @@ in, and Home offers the tools:
   exact span as a clip or grab a full-resolution still.
 - **Media Transfer** — send photos and videos from a phone or laptop to the
   host's save folder.
+- **Files** — browse the save folder from any signed-in device: icons or
+  details, sorted how you like, pictures full-screen, and a video opens straight
+  into the trimmer.
 - **Settings** — account, save location, and which devices may write to this
   machine. Host-only, and only shown on the host.
 
@@ -274,6 +277,41 @@ signed in, you approved it, and the folder is the one you designated to receive
 its files — so this is accepted rather than papered over with vague errors that
 would make legitimate skips unreadable.
 
+## Files
+
+Home → **Files** is a read-only window onto the folder the host chose in
+Settings — whatever that folder is, this is what the web UI can see, from the
+host's own browser or from a phone across the room.
+
+| | |
+| --- | --- |
+| **Views** | Details, or icons at four sizes. |
+| **Details columns** | Name is always there; Type, Size, Date modified, Extension and Category can be switched on or off, and every column sorts. |
+| **Sorting** | By any column, ascending or descending, from the sort control or by clicking a column heading. Folders always lead. |
+| **Filters** | All, Folders, Videos, Pictures, Audio, Other — with a count each. |
+| **Pictures** | Open full-screen, step through the folder's other pictures with ← and →, download the one on screen. |
+| **Videos** | Open into the player — the same A-B loop, the same export, the same gear — with **← Back to files** returning you to the listing you left. |
+
+Your choice of view, sort order, filters and columns is remembered in the
+browser, per device.
+
+What it can and cannot do is worth being precise about, because this is the one
+feature that lets a browser name a file at all:
+
+- Everything is named **relative to the save folder**. A session that is not the
+  host's own is never told the folder's real path — not in a listing, not in an
+  error, not anywhere.
+- `..`, drive letters, colons and symlinks pointing out of the folder are
+  refused rather than tidied up, so nothing outside the folder can be reached.
+- Pictures and videos are served; anything else is listed with its size and type
+  but its contents are not handed out.
+- **It reads.** There is no rename, no delete, no move, no overwrite and no
+  upload behind this page — the same create-only rule the rest of the app lives
+  under, minus even the create.
+
+Video posters are rendered once by ffmpeg into `cache/thumbs` and reused, keyed
+by the file's size and modification time, so a replaced file gets a new poster.
+
 ## Codecs the browser can't play
 
 Playback is the browser's own video decoder, which covers less than the desktop
@@ -353,6 +391,7 @@ The bar along the bottom, left to right:
 | **A-B** | Cycles the loop markers — see below. |
 | ⭳ Save clip | Saves the current A-B range to the host's save folder. Disabled until both markers exist. |
 | ⛶ Screenshot | Saves the frame on screen there as a PNG. |
+| ⚙ Export options | Frame size, compression, encoder speed, frame rate and audio, with a running size estimate. Web app only — see below. |
 | 🔊 Mute | Toggles audio. |
 | 🗀 Open | Open a different video without leaving the session. |
 
@@ -380,6 +419,41 @@ Once both markers exist, **the range becomes the whole world** for playback:
 
 Clear the markers to get the full timeline back. Markers live for the session only —
 they are never written to disk, and opening another video resets them.
+
+### Export options
+
+In the web app the control bar carries a **gear**. It is in the bar rather than
+beside the video on purpose: it appears with the controls, goes away with them,
+and cannot be left open over a video you are watching.
+
+| Option | What it changes |
+| --- | --- |
+| **Frame size** | 100 / 75 / 50 / 33 / 25 %, or a width you type. Height follows — the ratio is locked to the source's, and nothing is ever scaled *up*. |
+| **Compression** | The x264 CRF, 14 (near-lossless) to 34 (small and soft). 18 is the default, and what every earlier version cut at. |
+| **Encoder speed** | ultrafast → slower. Slower spends longer looking for savings and lands a smaller file at the same quality. |
+| **Frame rate** | A cap: same as source, or 60 / 30 / 24 / 15. |
+| **Audio** | 256 / 192 / 128 / 96 kbps AAC, or none at all. |
+
+Under them is the number the whole menu exists for:
+
+> **Whole video ≈ 412 MB**  ·  A-B range ≈ 41 MB
+
+The first line is the export at these settings **for the entire file** — A at the
+very start, B at the very end — so it is the largest a clip of this video can
+come out at. The second is what the range you have marked would cost.
+
+The estimate is a bits-per-pixel-per-frame model of x264's rate control, halving
+per six points of CRF, adjusted for the preset and the audio bitrate. It lives in
+`videotrim/encoding.py` and the page is handed its constants rather than a copy
+of the arithmetic, so the figure under the slider and the encode that runs are
+described by the same numbers. It is still an estimate: a still blue sky and a
+minute of confetti do not encode to the same size at the same CRF.
+
+Choices are remembered in the browser, and the gear wears a dot whenever they
+are no longer the defaults. They apply to **clips**; stills are always saved at
+the source's own resolution. Whatever the page asks for, the server re-derives
+the frame size from the file it probed and clamps every value again — a browser
+can request a width, never a height, and never one larger than the source.
 
 ### Scrubbing
 
@@ -431,7 +505,8 @@ the controls never auto-hide at all.
 | `Shift+←` / `→` | ∓1 frame | | `S` | Screenshot |
 | `↑` / `↓` | Volume | | `C` | Save the A-B clip |
 | `Home` | Stop (back to A) | | `F` / `F11` | Fullscreen |
-| `O` / `Ctrl+O` | Open a video | | `Esc` | Leave fullscreen |
+| `O` / `Ctrl+O` | Open a video | | `G` | Export options (web) |
+| | | | `Esc` | Close the options, or leave fullscreen |
 
 ---
 
@@ -519,7 +594,10 @@ videotrim/
   config/settings.py        typed settings, including the save location
 
   ── shared by both front ends, no Qt imports ──
-  ffmpeg_tools.py    ffmpeg discovery, probing, clip/still/preview commands
+  ffmpeg_tools.py    ffmpeg discovery, probing, clip/still/preview/poster
+                     commands
+  encoding.py        export options: what may be asked for, and how big the
+                     result will be
   naming.py          output filenames
   paths.py           name formatting (no longer a security boundary)
   timefmt.py         time formatting
@@ -538,11 +616,12 @@ videotrim/
   web/server.py      routes, the Gradio mount, and the guard around both
   web/shell.py       tool registry, capabilities, and the pages
   web/transfer.py    Media Transfer
+  web/library.py     Files — the read-only save-folder browser
   web/admin.py       host-only Settings
   web/output.py      the single way anything leaves this process
   web/media.py       session-scoped token registry, Range-aware streaming
   web/jobs.py        background ffmpeg jobs with pollable progress
-  web/assets/        login.*, shell.* and player.* — the browser front end
+  web/assets/        login.*, shell.*, player.* and files.* — the front end
 ```
 
 In the desktop app, playback state lives in `player.py` and the UI observes it

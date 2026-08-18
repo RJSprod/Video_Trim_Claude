@@ -43,6 +43,7 @@ class Tool:
 
 VIDEO_TRIM_ROUTE = "/tools/video-trim"
 TRANSFER_ROUTE = "/tools/media-transfer"
+FILES_ROUTE = "/tools/files"
 SETTINGS_ROUTE = "/settings"
 
 TOOLS = [
@@ -59,6 +60,13 @@ TOOLS = [
         "Send photos and videos from this device to the host's save folder.",
         "send",
         TRANSFER_ROUTE,
+    ),
+    Tool(
+        "files",
+        "Files",
+        "Browse the save folder, look through the pictures, open a video to trim.",
+        "grid",
+        FILES_ROUTE,
     ),
     Tool(
         "settings",
@@ -132,23 +140,43 @@ _PAGE = """<!DOCTYPE html>
 <meta name="color-scheme" content="dark light" />
 <title>{title}</title>
 <link rel="stylesheet" href="/vt/static/{stylesheet}?v={version}" />
+{styles}
 </head>
 <body class="vt-body" data-view="{view}">
 {body}
 <script src="/vt/static/{script}?v={version}" defer></script>
+{scripts}
 </body>
 </html>
 """
 
 
-def render_page(title, view, body, version, stylesheet="shell.css", script="shell.js"):
+def render_page(title, view, body, version, stylesheet="shell.css", script="shell.js",
+                extra_styles=(), extra_scripts=()):
+    """One page shape for every view.
+
+    ``extra_styles``/``extra_scripts`` name assets from ``/vt/static`` only —
+    they are asset filenames, never URLs, so a page cannot pull in anything this
+    application does not itself ship.
+    """
+    version = html.escape(str(version))
+    styles = "\n".join(
+        f'<link rel="stylesheet" href="/vt/static/{html.escape(name)}?v={version}" />'
+        for name in extra_styles
+    )
+    scripts = "\n".join(
+        f'<script src="/vt/static/{html.escape(name)}?v={version}" defer></script>'
+        for name in extra_scripts
+    )
     return _PAGE.format(
         title=html.escape(title),
         view=html.escape(view),
         body=body,
-        version=html.escape(str(version)),
+        version=version,
         stylesheet=stylesheet,
         script=script,
+        styles=styles,
+        scripts=scripts,
     )
 
 
@@ -300,6 +328,256 @@ def settings_page(version):
 </div>
 """
     return render_page(f"Settings — {PRODUCT_NAME}", "settings", body, version)
+
+
+# --- the player, and the pages that host it ----------------------------------
+# The player's markup lives here rather than in server.py because two pages need
+# it now: the Gradio Video Trim tool, and the Files browser, which swaps it in
+# when you open a video. One copy means one set of ids for player.js to find.
+PLAYER_MARKUP = """
+<div id="vt-app" class="vt-app" data-state="empty">
+  <div class="vt-stage" id="vt-stage" tabindex="0">
+    <video id="vt-video" class="vt-video" playsinline preload="metadata"></video>
+
+    <div class="vt-placeholder" id="vt-placeholder">
+      <div class="vt-placeholder-mark" data-icon="play"></div>
+      <p class="vt-placeholder-title" id="vt-placeholder-title">Drop a video here</p>
+      <p class="vt-placeholder-hint">
+        <button type="button" class="vt-upload" data-vt="pick">Choose a video…</button>
+      </p>
+      <p class="vt-placeholder-hint vt-placeholder-local" id="vt-placeholder-local">
+        or <button type="button" class="vt-link" data-vt="browse">browse this machine</button>
+        for a file already on it
+      </p>
+      <p class="vt-placeholder-note" id="vt-output-note"></p>
+    </div>
+
+    <div class="vt-flash vt-flash-left" id="vt-flash-left"><span>&laquo; 5s</span></div>
+    <div class="vt-flash vt-flash-right" id="vt-flash-right"><span>5s &raquo;</span></div>
+    <div class="vt-toast" id="vt-toast"></div>
+
+    <div class="vt-panel" id="vt-panel">
+      <!-- The options menu lives inside the control bar on purpose: the gear and
+           the menu it opens come and go with the controls, and neither can be on
+           screen while the bar is hidden. -->
+      <div class="vt-options" id="vt-options" role="dialog" aria-label="Export options" hidden>
+        <header class="vt-options-head">
+          <span>Export options</span>
+          <button type="button" class="vt-options-close" data-vt="options-close"
+                  title="Close (Esc)" aria-label="Close export options">&times;</button>
+        </header>
+
+        <div class="vt-options-body">
+          <section class="vt-option">
+            <h4>Frame size <em id="vt-opt-source">&nbsp;</em></h4>
+            <div class="vt-option-scales" id="vt-opt-scales" role="group"
+                 aria-label="Scale"></div>
+            <div class="vt-option-dims">
+              <label class="vt-option-field"><span>Width</span>
+                <input type="number" id="vt-opt-width" inputmode="numeric" step="2" /></label>
+              <span class="vt-option-lock" id="vt-opt-lock" aria-hidden="true"></span>
+              <label class="vt-option-field"><span>Height</span>
+                <input type="number" id="vt-opt-height" readonly tabindex="-1" /></label>
+            </div>
+            <p class="vt-option-hint">Locked to the source's aspect ratio, and never
+              scaled up past it.</p>
+          </section>
+
+          <section class="vt-option">
+            <h4>Compression <em id="vt-opt-crf-label">&nbsp;</em></h4>
+            <input type="range" id="vt-opt-crf" class="vt-option-range" />
+            <div class="vt-option-ends"><span>Bigger file</span><span>Smaller file</span></div>
+          </section>
+
+          <section class="vt-option">
+            <h4>Encoder speed</h4>
+            <select id="vt-opt-preset" class="vt-option-select"></select>
+            <p class="vt-option-hint">Slower spends longer looking for savings, and
+              lands a smaller file at the same quality.</p>
+          </section>
+
+          <section class="vt-option vt-option-pair">
+            <div>
+              <h4>Frame rate</h4>
+              <select id="vt-opt-fps" class="vt-option-select"></select>
+            </div>
+            <div>
+              <h4>Audio</h4>
+              <select id="vt-opt-audio" class="vt-option-select"></select>
+            </div>
+          </section>
+        </div>
+
+        <footer class="vt-options-foot">
+          <div class="vt-estimate">
+            <div class="vt-estimate-row">
+              <span>Whole video</span><strong id="vt-est-full">&mdash;</strong>
+            </div>
+            <div class="vt-estimate-row vt-estimate-range">
+              <span id="vt-est-range-label">A-B range</span><strong id="vt-est-range">&mdash;</strong>
+            </div>
+            <p class="vt-option-hint" id="vt-est-note">About this big at these settings —
+              an estimate, not a promise.</p>
+          </div>
+          <button type="button" class="vt-options-reset" data-vt="options-reset">
+            Reset to defaults</button>
+        </footer>
+      </div>
+
+      <div class="vt-scrub" id="vt-scrub" role="slider" aria-label="Seek"
+           aria-valuemin="0" aria-valuenow="0" aria-valuemax="0" tabindex="-1">
+        <div class="vt-track">
+          <div class="vt-buffer" id="vt-buffer"></div>
+          <div class="vt-ab-fill" id="vt-ab-fill"></div>
+          <div class="vt-played" id="vt-played"></div>
+          <div class="vt-mark vt-mark-a" id="vt-mark-a"><span>A</span></div>
+          <div class="vt-mark vt-mark-b" id="vt-mark-b"><span>B</span></div>
+          <div class="vt-handle" id="vt-handle"></div>
+        </div>
+      </div>
+
+      <div class="vt-row">
+        <div class="vt-time">
+          <div class="vt-time-main"><span id="vt-pos">0:00.0</span><i>/</i><span id="vt-dur">0:00</span></div>
+          <div class="vt-time-ab" id="vt-time-ab">no A-B range</div>
+        </div>
+
+        <div class="vt-buttons">
+          <button type="button" class="vt-btn" data-vt="stop" data-icon="stop"
+                  title="Stop — back to A (Home)"></button>
+          <button type="button" class="vt-btn" data-vt="back5" data-icon="back5"
+                  title="Back 5 seconds (&larr;)"></button>
+          <button type="button" class="vt-btn" data-vt="prev-frame" data-icon="prevFrame"
+                  title="Previous frame (,)"></button>
+          <button type="button" class="vt-btn vt-btn-primary" data-vt="play" data-icon="play"
+                  title="Play / pause (Space)"></button>
+          <button type="button" class="vt-btn" data-vt="next-frame" data-icon="nextFrame"
+                  title="Next frame (.)"></button>
+          <button type="button" class="vt-btn" data-vt="fwd5" data-icon="fwd5"
+                  title="Forward 5 seconds (&rarr;)"></button>
+          <button type="button" class="vt-btn" data-vt="repeat" data-icon="repeat"
+                  title="Repeat the A-B range (R)"></button>
+          <button type="button" class="vt-btn vt-btn-ab" data-vt="marker"
+                  title="Cycle the A-B markers (B)">A-B</button>
+          <button type="button" class="vt-btn" data-vt="clip" data-icon="clip"
+                  title="Save the A-B clip (C)" disabled></button>
+          <button type="button" class="vt-btn" data-vt="screenshot" data-icon="camera"
+                  title="Save this frame (S)"></button>
+          <button type="button" class="vt-btn" data-vt="options" data-icon="gear"
+                  title="Export options (G)" aria-haspopup="dialog"
+                  aria-expanded="false"></button>
+          <button type="button" class="vt-btn" data-vt="mute" data-icon="volumeOn"
+                  title="Mute (M)"></button>
+          <button type="button" class="vt-btn" data-vt="fullscreen" data-icon="fullscreen"
+                  title="Fullscreen (F)"></button>
+          <button type="button" class="vt-btn" data-vt="browse" data-icon="folder"
+                  title="Open a video (O)"></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="vt-sheet" id="vt-sheet" hidden>
+      <div class="vt-sheet-card">
+        <header>
+          <span id="vt-sheet-dir">&nbsp;</span>
+          <button type="button" class="vt-sheet-close" data-vt="sheet-close" title="Close">&times;</button>
+        </header>
+        <nav id="vt-sheet-shortcuts"></nav>
+        <ul id="vt-sheet-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="vt-saved" id="vt-saved" hidden>
+    <span class="vt-saved-label">Saved to <code id="vt-saved-dir"></code> &mdash; download:</span>
+    <ul id="vt-saved-list"></ul>
+  </div>
+
+  <input type="file" id="vt-file-input" accept="video/*" hidden />
+</div>
+"""
+
+
+def files_page(version):
+    """The file browser, plus the player it hands a video to.
+
+    Both live on one page so opening a video is a swap rather than a navigation:
+    the way back to the list is a button, not the browser's history, and the
+    listing is still there when you return.
+
+    Nothing here is a filesystem path. Entries are named relative to the save
+    folder, and the folder itself is called whatever the server decided this
+    session may be told — a real path for the host, a label for everyone else.
+    """
+    body = f"""
+<div class="vt-shell-frame vt-files-frame">
+  {_header(home=True, title="Files")}
+
+  <main class="vt-tool vt-files" id="vt-files">
+    <div class="vt-glass vt-panel-card vt-files-card">
+      <div class="vt-files-head">
+        <nav class="vt-crumbs" id="vt-crumbs" aria-label="Folder"></nav>
+        <p class="vt-files-where" id="vt-files-where">&nbsp;</p>
+      </div>
+
+      <div class="vt-files-controls">
+        <div class="vt-seg" id="vt-files-filter" role="group" aria-label="Show only"></div>
+        <div class="vt-files-right">
+          <label class="vt-files-sort">
+            <span>Sort</span>
+            <select id="vt-files-sort" class="vt-option-select"></select>
+          </label>
+          <button type="button" class="vt-icon-button" id="vt-files-order"
+                  title="Reverse the sort order" aria-label="Reverse the sort order"></button>
+          <div class="vt-seg" id="vt-files-view" role="group" aria-label="View as"></div>
+          <button type="button" class="vt-icon-button" id="vt-files-columns-toggle"
+                  aria-haspopup="true" aria-expanded="false"
+                  title="Choose columns" aria-label="Choose columns"></button>
+        </div>
+      </div>
+
+      <div class="vt-columns-menu" id="vt-files-columns" hidden>
+        <p class="vt-columns-title">Columns</p>
+        <div id="vt-files-columns-list"></div>
+        <p class="vt-hint">Shown in Details, and each one can be sorted by.</p>
+      </div>
+
+      <div class="vt-files-body" id="vt-files-body" aria-live="polite"></div>
+      <p class="vt-status" id="vt-files-status" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+</div>
+
+<div class="vt-lightbox" id="vt-lightbox" hidden role="dialog" aria-label="Picture">
+  <div class="vt-lightbox-bar">
+    <span class="vt-lightbox-name" id="vt-lightbox-name"></span>
+    <div class="vt-lightbox-actions">
+      <a class="vt-button vt-lightbox-download" id="vt-lightbox-download"
+         href="#" download>Download</a>
+      <button type="button" class="vt-icon-button" id="vt-lightbox-close"
+              title="Close (Esc)" aria-label="Close">&times;</button>
+    </div>
+  </div>
+  <button type="button" class="vt-lightbox-step" id="vt-lightbox-prev"
+          aria-label="Previous picture">&lsaquo;</button>
+  <img class="vt-lightbox-image" id="vt-lightbox-image" alt="" />
+  <button type="button" class="vt-lightbox-step vt-lightbox-next" id="vt-lightbox-next"
+          aria-label="Next picture">&rsaquo;</button>
+</div>
+
+<section class="vt-player-shell" id="vt-player-shell" hidden>
+  <div class="vt-player-bar">
+    <button type="button" class="vt-button" id="vt-player-back">&larr; Back to files</button>
+    <span class="vt-player-name" id="vt-player-name"></span>
+  </div>
+  {PLAYER_MARKUP}
+</section>
+"""
+    return render_page(
+        f"Files — {PRODUCT_NAME}", "files", body, version,
+        extra_styles=("player.css", "files.css"),
+        extra_scripts=("player.js", "files.js"),
+    )
 
 
 def _header(home=True, title=""):

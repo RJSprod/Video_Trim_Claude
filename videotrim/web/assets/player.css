@@ -232,6 +232,11 @@
   left: var(--vt-panel-margin);
   right: var(--vt-panel-margin);
   bottom: var(--vt-panel-margin);
+  /* Above the toast (4), below the file sheet (6). The bar and the toast never
+     overlap — the toast's offset is computed from the bar's height — but the
+     options menu inside the bar is tall, and a toast landing on top of it would
+     cover the very setting somebody is reading. */
+  z-index: 5;
   padding: 6px 12px 8px;
   border-radius: var(--vt-radius);
   border: 1px solid var(--vt-panel-edge);
@@ -522,8 +527,14 @@
      to two or three rows on a narrow screen and a fixed offset would collide. */
   bottom: calc(var(--vt-panel-margin) + var(--vt-panel-height, 92px) + 10px);
   transform: translate(-50%, 8px);
+  /* Centred on the stage, so the room to the right of `left: 50%` is all an
+     auto width gets to shrink into — which on a phone left a toast carrying an
+     action button as a one-word-per-line column. Sizing to the content and
+     capping it puts the cap in charge instead of the anchor. */
+  width: max-content;
   max-width: min(78%, 580px);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -817,6 +828,278 @@
   #vt-app button.vt-btn-primary {
     min-width: 44px;
     height: 44px;
+  }
+}
+
+/* --- export options ------------------------------------------------------- */
+/* The menu is a child of the control bar, so it inherits the bar's fade: there
+   is no state in which it is on screen and the controls are not. */
+#vt-app .vt-options {
+  position: absolute;
+  right: 6px;
+  bottom: calc(100% + 10px);
+  width: min(360px, calc(100vw - 40px));
+  /* As tall as the room above the control bar, and no taller: the stage clips
+     its children, so a menu that guessed would have its top cut off. Both
+     custom properties are published by watchPanelHeight() in player.js. */
+  max-height: min(640px, calc(var(--vt-stage-height, 70vh)
+                              - var(--vt-panel-height, 96px) - 26px));
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--vt-radius);
+  border: 1px solid var(--vt-panel-edge);
+  background: rgba(11, 13, 18, 0.94);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+  color: var(--vt-text);
+  z-index: 6;
+  overflow: hidden;
+}
+
+#vt-app .vt-options[hidden] { display: none; }
+
+#vt-app .vt-options-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px 9px 14px;
+  font-weight: 640;
+  font-size: 0.92rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+#vt-app button.vt-options-close {
+  border: 0;
+  background: transparent;
+  color: var(--vt-text-dim);
+  font-size: 1.35rem;
+  line-height: 1;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+#vt-app button.vt-options-close:hover { background: var(--vt-btn-hover); color: var(--vt-text); }
+
+#vt-app .vt-options-body {
+  padding: 4px 14px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#vt-app .vt-option { padding: 9px 0 3px; }
+
+#vt-app .vt-option + .vt-option { border-top: 1px solid rgba(255, 255, 255, 0.07); }
+
+#vt-app .vt-option h4 {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  font-weight: 640;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vt-text-dim);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+#vt-app .vt-option h4 em {
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--vt-text-faint);
+}
+
+#vt-app .vt-option-hint {
+  margin: 7px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--vt-text-faint);
+}
+
+#vt-app .vt-option-scales {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+#vt-app button.vt-scale {
+  min-width: 52px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-panel-edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-text-dim);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+#vt-app button.vt-scale:hover:not(:disabled) { background: var(--vt-btn-hover); color: var(--vt-text); }
+
+#vt-app button.vt-scale[data-on="1"] {
+  background: var(--vt-btn-on);
+  border-color: var(--vt-accent-soft);
+  color: var(--vt-text);
+  font-weight: 640;
+}
+
+#vt-app button.vt-scale:disabled { opacity: 0.4; cursor: default; }
+
+#vt-app .vt-option-dims {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+#vt-app .vt-option-field {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.74rem;
+  color: var(--vt-text-faint);
+}
+
+#vt-app .vt-option-field input {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-panel-edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-text);
+  font: inherit;
+  font-size: 0.88rem;
+}
+
+#vt-app .vt-option-field input:read-only {
+  color: var(--vt-text-dim);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* The padlock says the two boxes move together, which is why only one of them
+   can be typed into. */
+#vt-app .vt-option-lock {
+  width: 18px;
+  height: 36px;
+  flex: 0 0 18px;
+  background-repeat: no-repeat;
+  background-position: center;
+  opacity: 0.55;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23ecf0f6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4.5' y='8.6' width='11' height='7.4' rx='1.8'/%3E%3Cpath d='M7.2 8.6V6.9a2.8 2.8 0 0 1 5.6 0v1.7'/%3E%3C/svg%3E");
+}
+
+#vt-app .vt-option-range {
+  width: 100%;
+  margin: 2px 0 0;
+  accent-color: var(--vt-accent);
+}
+
+#vt-app .vt-option-ends {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--vt-text-faint);
+}
+
+#vt-app select.vt-option-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-panel-edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-text);
+  font: inherit;
+  font-size: 0.86rem;
+}
+
+#vt-app .vt-option-pair {
+  display: flex;
+  gap: 12px;
+}
+
+#vt-app .vt-option-pair > div { flex: 1 1 0; min-width: 0; }
+
+#vt-app .vt-options-foot {
+  padding: 11px 14px 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+#vt-app .vt-estimate-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.88rem;
+}
+
+#vt-app .vt-estimate-row span { color: var(--vt-text-dim); }
+
+#vt-app .vt-estimate-row strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+#vt-app .vt-estimate-row:first-child strong { color: var(--vt-accent); font-size: 1.06rem; }
+
+#vt-app .vt-estimate-range { margin-top: 3px; }
+
+#vt-app .vt-estimate-range strong { color: var(--vt-ab); }
+
+#vt-app button.vt-options-reset {
+  margin-top: 10px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-panel-edge);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-text-dim);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+#vt-app button.vt-options-reset:hover { background: var(--vt-btn-hover); color: var(--vt-text); }
+
+/* A dot on the gear when the export is no longer the shipped default, so a
+   surprising file size has something to point at. */
+#vt-app button.vt-btn[data-vt="options"] { position: relative; }
+
+#vt-app button.vt-btn[data-vt="options"][data-on="1"]::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vt-ab);
+}
+
+/* On a phone the stage is short — 56.25vw of a narrow screen — and the room
+   above the control bar is a sliver. So the menu covers the bar instead of
+   sitting on top of it: it still cannot be open while the controls are hidden,
+   and it gets the whole stage to be legible in. */
+@media (max-width: 640px) {
+  #vt-app .vt-options {
+    right: 4px;
+    left: 4px;
+    width: auto;
+    bottom: 0;
+    max-height: calc(var(--vt-stage-height, 60vh) - 16px);
+    /* Opaque here: covering the whole stage means whatever is behind it would
+       otherwise show through the settings being read. */
+    background: #0b0d12;
   }
 }
 

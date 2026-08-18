@@ -65,6 +65,8 @@
     folder: svg('<path d="M3.4 6.4a1.4 1.4 0 0 1 1.4-1.4h2.8l1.4 2h5.8a1.4 1.4 0 0 1 1.4 1.4v6a1.4 1.4 0 0 1-1.4 1.4H4.8a1.4 1.4 0 0 1-1.4-1.4z"/>', true),
     up: svg('<path d="M10 15.6V4.8M5.6 9.2L10 4.8l4.4 4.4"/>', true),
     file: svg('<path d="M7.4 6.6L14 10l-6.6 3.4z"/>'),
+    gear: svg('<circle cx="10" cy="10" r="2.6"/>' +
+      '<path d="M10 2.9l1 2.1 2.3-.5 1.2 1.2-.5 2.3 2.1 1v1.7l-2.1 1 .5 2.3-1.2 1.2-2.3-.5-1 2.1H8.9l-1-2.1-2.3.5-1.2-1.2.5-2.3-2.1-1V9l2.1-1-.5-2.3 1.2-1.2 2.3.5 1-2.1z"/>', true),
     upload: svg('<path d="M10 13.4V3.6M6.6 7L10 3.6 13.4 7M4.2 13.6v2.2a1 1 0 0 0 1 1h9.6a1 1 0 0 0 1-1v-2.2"/>', true)
   };
 
@@ -95,8 +97,30 @@
     browseDir: "",
     localFile: null,      // a File being played from this device, never sent
     objectUrl: "",        // its blob URL, revoked when another file replaces it
-    fpsSamples: []        // frame gaps, for measuring the rate of a local file
+    fpsSamples: [],       // frame gaps, for measuring the rate of a local file
+    options: null,        // what the gear menu chose, or null for "as shipped"
+    optionsOpen: false
   };
+
+  /* The export model — bitrate curve, choices, defaults — comes from the
+   * server's videotrim/encoding.py so the estimate under the slider and the
+   * encode that eventually runs are described by the same numbers. These are
+   * only a stand-in until /vt/api/config answers. */
+  var MODEL = {
+    defaults: { width: 0, crf: 18, preset: "veryfast", fps_cap: 0, audio_kbps: 192 },
+    presets: ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium",
+              "slow", "slower"],
+    preset_factors: { ultrafast: 1.65, superfast: 1.35, veryfast: 1.2, faster: 1.1,
+                      fast: 1.05, medium: 1, slow: 0.93, slower: 0.88 },
+    crf_min: 14, crf_max: 34,
+    audio_choices: [0, 96, 128, 192, 256],
+    fps_choices: [0, 15, 24, 30, 60],
+    min_width: 128, max_width: 7680,
+    anchor_bpp: 0.0643, anchor_crf: 23, crf_halving: 6, container_overhead: 0.005
+  };
+
+  var OPTIONS_KEY = "vt.export.options";
+  var SCALE_STEPS = [100, 75, 50, 33, 25];
 
   // --- formatting (mirrors videotrim/timefmt.py) -----------------------------
   function fmtTime(ms, tenths) {
@@ -443,6 +467,9 @@
     ["stop", "back5", "fwd5", "prevFrame", "nextFrame", "marker", "repeat"].forEach(function (key) {
       if (dom.btn[key]) dom.btn[key].disabled = !hasMedia();
     });
+
+    if (dom.btn.options) dom.btn.options.disabled = !config.ffmpeg;
+    if (st.optionsOpen) renderOptions();
   }
 
   // --- toasts ----------------------------------------------------------------
@@ -628,6 +655,347 @@
     return window.location.hostname || "the host";
   }
 
+  // --- export options --------------------------------------------------------
+  /* The gear menu. It lives inside the control bar, so it is on screen exactly
+   * when the controls are and cannot be left open over a bare video.
+   *
+   * Everything here is a *request*. The server re-derives the frame size from
+   * the source it probed and clamps every number to the same bounds again, so
+   * nothing in this file is what keeps an export sane — it is what makes the
+   * choice visible, and what puts a size next to it before you commit.
+   */
+  function defaultOptions() {
+    var base = MODEL.defaults || {};
+    return {
+      width: 0,
+      crf: base.crf,
+      preset: base.preset,
+      fps_cap: base.fps_cap,
+      audio_kbps: base.audio_kbps
+    };
+  }
+
+  function options() {
+    if (!st.options) st.options = defaultOptions();
+    return st.options;
+  }
+
+  function loadStoredOptions() {
+    try {
+      var raw = window.localStorage.getItem(OPTIONS_KEY);
+      if (!raw) return;
+      var saved = JSON.parse(raw);
+      if (!saved || typeof saved !== "object") return;
+      var current = defaultOptions();
+      // Scale is remembered as a percentage: a width from one video means
+      // nothing for the next one, but "half size" always does.
+      if (typeof saved.scale_percent === "number") {
+        current.scale_percent = clampNumber(saved.scale_percent, 10, 100);
+      }
+      ["crf", "fps_cap", "audio_kbps"].forEach(function (key) {
+        if (typeof saved[key] === "number") current[key] = saved[key];
+      });
+      if (MODEL.presets.indexOf(saved.preset) >= 0) current.preset = saved.preset;
+      current.crf = clampNumber(current.crf, MODEL.crf_min, MODEL.crf_max);
+      if (MODEL.audio_choices.indexOf(current.audio_kbps) < 0) {
+        current.audio_kbps = MODEL.defaults.audio_kbps;
+      }
+      if (MODEL.fps_choices.indexOf(current.fps_cap) < 0) current.fps_cap = 0;
+      st.options = current;
+    } catch (err) { /* a corrupt preference is not worth a broken player */ }
+  }
+
+  function storeOptions() {
+    try {
+      var current = options();
+      window.localStorage.setItem(OPTIONS_KEY, JSON.stringify({
+        scale_percent: current.scale_percent || 100,
+        crf: current.crf,
+        preset: current.preset,
+        fps_cap: current.fps_cap,
+        audio_kbps: current.audio_kbps
+      }));
+    } catch (err) { /* private browsing; the options still work for this session */ }
+  }
+
+  function clampNumber(value, low, high) {
+    value = Number(value);
+    if (!isFinite(value)) return low;
+    return Math.max(low, Math.min(high, value));
+  }
+
+  function evenNumber(value, floor) {
+    var number = Math.round(Number(value) || 0);
+    if (number % 2) number -= 1;
+    return Math.max(floor || 2, number);
+  }
+
+  /* The source's own pixel size. A file on the host was probed; one playing
+   * from this device reports it once the browser has the metadata. */
+  function sourceSize() {
+    var width = (st.media && st.media.width) || (dom.video && dom.video.videoWidth) || 0;
+    var height = (st.media && st.media.height) || (dom.video && dom.video.videoHeight) || 0;
+    return { width: Math.round(width), height: Math.round(height) };
+  }
+
+  function sourceFps() {
+    var fps = (st.media && st.media.fps) || 0;
+    return fps > 0 ? fps : FALLBACK_FPS;
+  }
+
+  /* The width an export would come out at, in pixels. Kept as a percentage in
+   * state and turned into pixels here, against whatever is loaded now. */
+  function targetWidth() {
+    var size = sourceSize();
+    var percent = options().scale_percent || 100;
+    if (!size.width || percent >= 100) return size.width;
+    return evenNumber(size.width * percent / 100, MODEL.min_width);
+  }
+
+  function targetHeight() {
+    var size = sourceSize();
+    if (!size.width || !size.height) return 0;
+    var width = targetWidth();
+    if (width >= size.width) return size.height;
+    return evenNumber(width * size.height / size.width, 2);
+  }
+
+  function optionsPayload() {
+    /* What the clip route is sent. Only ``width`` travels — the height is the
+     * server's to derive from the source it probed, which is what keeps the
+     * aspect ratio locked no matter what this page believes. */
+    var current = options();
+    var size = sourceSize();
+    var width = targetWidth();
+    return {
+      width: (size.width && width && width < size.width) ? width : 0,
+      crf: current.crf,
+      preset: current.preset,
+      fps_cap: current.fps_cap,
+      audio_kbps: current.audio_kbps
+    };
+  }
+
+  function optionsAreDefault() {
+    var current = options();
+    var base = MODEL.defaults;
+    return (current.scale_percent || 100) === 100
+      && current.crf === base.crf
+      && current.preset === base.preset
+      && current.fps_cap === base.fps_cap
+      && current.audio_kbps === base.audio_kbps;
+  }
+
+  /* The same curve as videotrim/encoding.py: bits per pixel per frame, halved
+   * every crf_halving steps, times a factor for how hard the preset looks. */
+  function estimateBytes(durationMs) {
+    var seconds = Math.max(0, durationMs || 0) / 1000;
+    if (seconds <= 0) return 0;
+    var width = targetWidth();
+    var height = targetHeight();
+    if (!width || !height) return 0;
+
+    var current = options();
+    var rate = sourceFps();
+    if (current.fps_cap) rate = Math.min(rate, current.fps_cap);
+
+    var bpp = MODEL.anchor_bpp
+      * Math.pow(2, (MODEL.anchor_crf - current.crf) / MODEL.crf_halving)
+      * (MODEL.preset_factors[current.preset] || 1);
+    var bits = bpp * width * height * rate + current.audio_kbps * 1000;
+    return Math.round(bits * seconds / 8 * (1 + MODEL.container_overhead));
+  }
+
+  function crfWords(crf) {
+    if (crf <= 16) return "near-lossless";
+    if (crf <= 20) return "high quality";
+    if (crf <= 24) return "good";
+    if (crf <= 28) return "compressed";
+    return "small and soft";
+  }
+
+  /* Choice lists are repainted whenever the model changes; the listeners on the
+   * static controls are attached once per set of nodes. The flag lives on the
+   * node itself, so a re-mount against fresh DOM wires those fresh nodes. */
+  function buildOptionsUI() {
+    if (!dom.options) return;
+    paintOptionChoices();
+    if (dom.options.getAttribute("data-wired") !== "1") {
+      wireOptionControls();
+      dom.options.setAttribute("data-wired", "1");
+    }
+    renderOptions();
+  }
+
+  function paintOptionChoices() {
+    dom.optScales.innerHTML = "";
+    SCALE_STEPS.forEach(function (percent) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "vt-scale";
+      button.textContent = percent + "%";
+      button.setAttribute("data-percent", String(percent));
+      button.addEventListener("click", function () {
+        options().scale_percent = percent;
+        storeOptions();
+        renderOptions();
+      });
+      dom.optScales.appendChild(button);
+    });
+
+    dom.optCrf.min = String(MODEL.crf_min);
+    dom.optCrf.max = String(MODEL.crf_max);
+    dom.optCrf.step = "1";
+
+    dom.optPreset.innerHTML = "";
+    MODEL.presets.forEach(function (name) {
+      var option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      dom.optPreset.appendChild(option);
+    });
+
+    dom.optFps.innerHTML = "";
+    MODEL.fps_choices.forEach(function (value) {
+      var option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = value ? "Cap at " + value + " fps" : "Same as source";
+      dom.optFps.appendChild(option);
+    });
+
+    dom.optAudio.innerHTML = "";
+    MODEL.audio_choices.forEach(function (value) {
+      var option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = value ? value + " kbps AAC" : "No audio";
+      dom.optAudio.appendChild(option);
+    });
+  }
+
+  function wireOptionControls() {
+    // The slider reads left-to-right as "bigger file → smaller file", which is
+    // the opposite of CRF's own direction, so the value is mirrored.
+    dom.optCrf.addEventListener("input", function () {
+      options().crf = MODEL.crf_min + MODEL.crf_max - Number(dom.optCrf.value);
+      renderOptions();
+    });
+    dom.optCrf.addEventListener("change", storeOptions);
+
+    dom.optPreset.addEventListener("change", function () {
+      options().preset = dom.optPreset.value;
+      storeOptions();
+      renderOptions();
+    });
+
+    dom.optFps.addEventListener("change", function () {
+      options().fps_cap = Number(dom.optFps.value);
+      storeOptions();
+      renderOptions();
+    });
+
+    dom.optAudio.addEventListener("change", function () {
+      options().audio_kbps = Number(dom.optAudio.value);
+      storeOptions();
+      renderOptions();
+    });
+
+    /* Typing a width picks the nearest percentage of the source rather than
+     * storing pixels: the aspect ratio then stays locked when the next video
+     * loads at a different size, and the server derives the height either way. */
+    dom.optWidth.addEventListener("change", function () {
+      var size = sourceSize();
+      var wanted = Number(dom.optWidth.value);
+      if (!size.width || !isFinite(wanted) || wanted <= 0) {
+        renderOptions();
+        return;
+      }
+      wanted = clampNumber(wanted, MODEL.min_width, size.width);
+      options().scale_percent = clampNumber(
+        Math.round(wanted / size.width * 100), 10, 100);
+      storeOptions();
+      renderOptions();
+    });
+  }
+
+  function renderOptions() {
+    if (!dom.options) return;
+    var current = options();
+    var size = sourceSize();
+    var width = targetWidth();
+    var height = targetHeight();
+    var percent = current.scale_percent || 100;
+
+    dom.optSource.textContent = size.width && size.height
+      ? "source " + size.width + "×" + size.height
+      : "source size unknown";
+
+    Array.prototype.forEach.call(dom.optScales.children, function (button) {
+      var value = Number(button.getAttribute("data-percent"));
+      button.setAttribute("data-on", value === percent ? "1" : "0");
+      button.disabled = !size.width;
+      if (size.width) {
+        button.title = evenNumber(size.width * value / 100, MODEL.min_width) + " px wide";
+      }
+    });
+
+    dom.optWidth.min = String(MODEL.min_width);
+    dom.optWidth.max = String(size.width || MODEL.max_width);
+    dom.optWidth.value = width ? String(width) : "";
+    dom.optWidth.disabled = !size.width;
+    dom.optHeight.value = height ? String(height) : "";
+
+    dom.optCrf.value = String(MODEL.crf_min + MODEL.crf_max - current.crf);
+    dom.optCrfLabel.textContent = "CRF " + current.crf + " — " + crfWords(current.crf);
+    dom.optPreset.value = current.preset;
+    dom.optFps.value = String(current.fps_cap);
+    dom.optAudio.value = String(current.audio_kbps);
+
+    var total = durationMs();
+    var full = estimateBytes(total);
+    dom.estFull.textContent = full ? "≈ " + fmtSize(full) : "—";
+    if (hasLoop()) {
+      dom.estRangeLabel.textContent = "A-B range  " + fmtTime(st.b - st.a);
+      dom.estRange.textContent = "≈ " + fmtSize(estimateBytes(st.b - st.a));
+    } else {
+      dom.estRangeLabel.textContent = "A-B range";
+      dom.estRange.textContent = "not set";
+    }
+    dom.estNote.textContent = total
+      ? "The whole-video figure is the largest this can get: A at the start, B at " +
+        "the end. Estimates, not promises — busy footage encodes larger."
+      : "Open a video to see how large an export would be.";
+
+    if (dom.btn.options) {
+      dom.btn.options.setAttribute("data-on", optionsAreDefault() ? "0" : "1");
+      dom.btn.options.setAttribute("aria-expanded", st.optionsOpen ? "true" : "false");
+    }
+  }
+
+  function toggleOptions(open) {
+    if (!dom.options) return;
+    st.optionsOpen = open === undefined ? !st.optionsOpen : !!open;
+    dom.options.hidden = !st.optionsOpen;
+    // An open menu must not have the bar fade out from under it.
+    if (st.optionsOpen) {
+      buildOptionsUI();
+      renderOptions();
+      window.clearTimeout(st.hideTimer);
+      showPanel();
+    } else {
+      bumpAutoHide();
+    }
+    if (dom.btn.options) {
+      dom.btn.options.setAttribute("aria-expanded", st.optionsOpen ? "true" : "false");
+    }
+  }
+
+  function resetOptions() {
+    st.options = defaultOptions();
+    storeOptions();
+    renderOptions();
+    toast("Export options back to defaults.", 1800);
+  }
+
   // --- loading media ---------------------------------------------------------
   function loadMedia(info) {
     st.media = info;
@@ -719,6 +1087,22 @@
       })
       .catch(function (err) { fail(err.message); });
     return true;
+  }
+
+  /* Open a file from the save folder, named relative to it. The path never
+   * identifies a location on the host: it is what the Files browser listed, and
+   * the server re-resolves it inside the save folder before opening anything. */
+  function openLibrary(path, label) {
+    var name = label || String(path || "").split("/").pop();
+    toast("Opening " + name + "…", 0);
+    return postJson("/vt/api/library/open", { path: path })
+      .then(function (info) {
+        hideToast();
+        st.localFile = null;
+        loadMedia(info);
+        return info;
+      })
+      .catch(function (err) { fail(err.message); throw err; });
   }
 
   function openPath(path) {
@@ -917,7 +1301,12 @@
     ensureOnHost()
       .then(function () {
         toast("Exporting clip…  0%", 0);
-        return postJson("/vt/api/clip", { token: st.media.token, a_ms: a, b_ms: b });
+        return postJson("/vt/api/clip", {
+          token: st.media.token,
+          a_ms: a,
+          b_ms: b,
+          options: optionsPayload()
+        });
       })
       .then(function (job) {
         st.busy = job.id;
@@ -1157,6 +1546,13 @@
     // Clicks on the bar, the sheet or the placeholder links are not video taps.
     if (event.target.closest(".vt-panel, .vt-sheet, .vt-placeholder-hint, .vt-toast")) return;
 
+    // Tapping the video is how you dismiss the options menu, the same way it
+    // dismisses the pinned control bar.
+    if (st.optionsOpen) {
+      toggleOptions(false);
+      return;
+    }
+
     if (st.tapTimer) {
       window.clearTimeout(st.tapTimer);
       st.tapTimer = 0;
@@ -1182,7 +1578,12 @@
     if (event.ctrlKey && event.key.toLowerCase() !== "o") return;
     if (event.metaKey || event.altKey) return;
 
+    // The Files browser hosts this player on a page where it is often hidden.
+    // A hidden player must not be quietly eating the arrow keys.
+    if (playerHidden()) return;
+
     if (event.key === "Escape") {
+      if (st.optionsOpen) { toggleOptions(false); event.preventDefault(); return; }
       if (!dom.sheet.hidden) { closeBrowser(); event.preventDefault(); return; }
       if (document.fullscreenElement) { document.exitFullscreen(); event.preventDefault(); }
       return;
@@ -1194,6 +1595,11 @@
 
     if (lower === "o") {
       openBrowser();
+      event.preventDefault();
+      return;
+    }
+    if (lower === "g") {
+      toggleOptions();
       event.preventDefault();
       return;
     }
@@ -1268,6 +1674,14 @@
     bumpAutoHide();
   }
 
+  /* True when this player is on a page that is currently showing something
+   * else — the Files browser keeps it mounted behind the listing. */
+  function playerHidden() {
+    if (!dom.app) return true;
+    if (document.fullscreenElement) return false;
+    return dom.app.offsetParent === null;
+  }
+
   function toggleFullscreen() {
     if (document.fullscreenElement) {
       document.exitFullscreen();
@@ -1301,7 +1715,10 @@
       if (st.local) openBrowser(); else dom.fileInput.click();
     },
     pick: function () { dom.fileInput.click(); },
-    "sheet-close": closeBrowser
+    "sheet-close": closeBrowser,
+    options: function () { toggleOptions(); },
+    "options-close": function () { toggleOptions(false); },
+    "options-reset": resetOptions
   };
 
   function wire() {
@@ -1421,15 +1838,21 @@
   }
 
   /* Publish the control bar's height so the toast can sit above it whatever it
-   * wraps to. Cheap, and it means one CSS rule covers every viewport width. */
+   * wraps to, and the stage's so the options menu can size itself to the room
+   * that actually leaves. The stage clips its children, so a menu that guessed
+   * would be a menu with its top cut off. */
   function watchPanelHeight() {
     var publish = function () {
       var height = Math.round(dom.panel.getBoundingClientRect().height);
       if (height > 0) dom.stage.style.setProperty("--vt-panel-height", height + "px");
+      var stage = Math.round(dom.stage.getBoundingClientRect().height);
+      if (stage > 0) dom.stage.style.setProperty("--vt-stage-height", stage + "px");
     };
     publish();
     if (typeof ResizeObserver === "function") {
-      new ResizeObserver(publish).observe(dom.panel);
+      var observer = new ResizeObserver(publish);
+      observer.observe(dom.panel);
+      observer.observe(dom.stage);
     } else {
       window.addEventListener("resize", publish);
     }
@@ -1495,11 +1918,26 @@
     dom.fileInput = byId("vt-file-input");
     dom.outputNote = byId("vt-output-note");
 
+    dom.options = byId("vt-options");
+    dom.optSource = byId("vt-opt-source");
+    dom.optScales = byId("vt-opt-scales");
+    dom.optWidth = byId("vt-opt-width");
+    dom.optHeight = byId("vt-opt-height");
+    dom.optCrf = byId("vt-opt-crf");
+    dom.optCrfLabel = byId("vt-opt-crf-label");
+    dom.optPreset = byId("vt-opt-preset");
+    dom.optFps = byId("vt-opt-fps");
+    dom.optAudio = byId("vt-opt-audio");
+    dom.estFull = byId("vt-est-full");
+    dom.estRange = byId("vt-est-range");
+    dom.estRangeLabel = byId("vt-est-range-label");
+    dom.estNote = byId("vt-est-note");
+
     // Scoped to the panel on purpose: "browse" also names the placeholder link,
     // and an unscoped query would hand back that one instead of the button.
     dom.btn = {};
     ["play", "stop", "back5", "fwd5", "repeat", "marker", "clip", "screenshot",
-     "mute", "fullscreen", "browse"].forEach(function (name) {
+     "mute", "fullscreen", "browse", "options"].forEach(function (name) {
       dom.btn[name] = dom.panel.querySelector('[data-vt="' + name + '"]');
     });
     dom.btn.prevFrame = dom.panel.querySelector('[data-vt="prev-frame"]');
@@ -1527,9 +1965,20 @@
     render();
     showPanel();
 
+    loadStoredOptions();
+    buildOptionsUI();
+
     request("/vt/api/config")
       .then(function (data) {
         config = data;
+        if (data.export_model) {
+          // Repaint against the server's own choices rather than the built-in
+          // stand-in, then re-apply whatever was saved on this device.
+          MODEL = data.export_model;
+          st.options = null;
+          loadStoredOptions();
+          buildOptionsUI();
+        }
         // Browsing host paths, not being the host: the two are different
         // questions and only the first one decides what this page offers.
         st.local = data.can_browse !== false;
@@ -1550,7 +1999,10 @@
   window.VideoTrim = {
     mount: mount,
     openPath: openPath,
+    openLibrary: openLibrary,
     openBrowser: openBrowser,
+    closeOptions: function () { toggleOptions(false); },
+    pause: pause,
     state: st
   };
 

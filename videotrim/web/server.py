@@ -6,6 +6,7 @@ Shape of the thing:
     /                       Home — the tool launcher
     /tools/video-trim       the Gradio page and the hand-written player
     /tools/media-transfer   device-to-host media transfer
+    /tools/files            the save folder, browsed read-only
     /settings               host-local only
     /vt/api/...             the routes those views talk to
     /vt/media/<token>       a video, with byte ranges so scrubbing works
@@ -29,7 +30,7 @@ import gradio as gr
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-from .. import ffmpeg_tools
+from .. import encoding, ffmpeg_tools
 from ..config.settings import SettingsService
 from ..config.store import CommitJournal, Store
 from ..ffmpeg_tools import FFmpegError
@@ -45,10 +46,11 @@ from ..security.write_policy import WritePolicy
 from . import shell
 from .admin import register_admin_routes
 from .jobs import JobRegistry
+from .library import register_library_routes, sweep_posters
 from .media import VIDEO_SUFFIXES, MediaRegistry, file_response
 from .output import CollisionPolicy, OutputService, OutputUnavailable
 from .parsing import read_json
-from .shell import TRANSFER_ROUTE, VIDEO_TRIM_ROUTE
+from .shell import FILES_ROUTE, PLAYER_MARKUP, TRANSFER_ROUTE, VIDEO_TRIM_ROUTE
 from .transfer import register_transfer_routes
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -89,7 +91,7 @@ def _asset_version():
     """Bust the browser cache whenever the front-end source changes."""
     stamps = []
     for name in ("player.js", "player.css", "shell.js", "shell.css",
-                 "login.js", "login.css"):
+                 "login.js", "login.css", "files.js", "files.css"):
         try:
             stamps.append(int((ASSETS / name).stat().st_mtime))
         except OSError:
@@ -192,6 +194,26 @@ class VideoTrimWeb:
         if not decision.allowed:
             raise HTTPException(status_code=403, detail=decision.reason)
         return decision
+
+    # --- export options ------------------------------------------------------
+    def export_options(self, raw, source):
+        """Vet a client's export options against the file they apply to.
+
+        The source is probed for its real frame size, and scaling is derived
+        from that — a client can ask for a width, never for a height, so there
+        is no request that stretches somebody's video. A probe that fails costs
+        the scaling only; the rest of the options still stand.
+        """
+        if not isinstance(raw, dict) or not raw:
+            return None
+        width = height = 0
+        try:
+            info = ffmpeg_tools.probe_video(source, ffmpeg=self.ffmpeg,
+                                            ffprobe=self.ffprobe)
+            width, height = int(info["width"]), int(info["height"])
+        except FFmpegError:
+            pass
+        return encoding.normalize(raw, source_width=width, source_height=height)
 
     # --- media ---------------------------------------------------------------
     def describe(self, path, session, request, kind="source", capability="upload"):
@@ -305,6 +327,10 @@ def _register_shell_routes(app, state):
     def transfer_view():
         return HTMLResponse(shell.transfer_page(state.asset_version))
 
+    @app.get(FILES_ROUTE, response_class=HTMLResponse)
+    def files_view():
+        return HTMLResponse(shell.files_page(state.asset_version))
+
     @app.get(shell.SETTINGS_ROUTE, response_class=HTMLResponse)
     def settings_view(request: Request):
         # The card is hidden remotely, but hiding is a courtesy — this is the
@@ -391,6 +417,10 @@ def _register_routes(app, state):
             "can_request_access": decision.can_request,
             "destination": state.output.destination_for(host_local),
             "output_configured": state.output.is_configured(),
+            # The gear menu does its own arithmetic so the estimate can follow a
+            # slider, but the numbers behind it come from here — one description
+            # of the codec, shared by the estimate and the encode.
+            "export_model": encoding.model(),
         }
 
     @app.api_route("/vt/media/{token}", methods=["GET", "HEAD"])
@@ -711,6 +741,11 @@ def _register_routes(app, state):
         if state.jobs.active("clip"):
             raise HTTPException(status_code=409, detail="An export is already running.")
 
+        # What the gear menu chose. Vetted against the source's *probed*
+        # dimensions rather than against a width and height the page sent as a
+        # pair, so the aspect ratio is locked here and not merely in the UI.
+        options = state.export_options(body.get("options"), source)
+
         # ffmpeg renders into the app's own cache under a per-job folder. It
         # never names a file in the save folder, which is what closes the old
         # race between picking a free name and encoding over it.
@@ -740,7 +775,8 @@ def _register_routes(app, state):
             "clip",
             f"Exporting clip → {desired}",
             b_ms - a_ms,
-            ffmpeg_tools.clip_command(ffmpeg, source, staged, a_ms, b_ms),
+            ffmpeg_tools.clip_command(ffmpeg, source, staged, a_ms, b_ms,
+                                      options=options),
             staged,
             on_success=publish,
             owner_session=session.id,
@@ -815,6 +851,9 @@ def _register_routes(app, state):
 
 
 # --- the Gradio page ---------------------------------------------------------
+# The player's markup is shared with the Files browser, so it lives in shell.py.
+# The style block stays here: it is about this page's load sequence, not about
+# the player.
 PLAYER_HTML = """
 <style>
   /* The stylesheet arrives asynchronously from /vt/static. Hide the player
@@ -824,97 +863,7 @@ PLAYER_HTML = """
   #vt-app { visibility: hidden; }
   html.vt-ready #vt-app { visibility: visible; }
 </style>
-<div id="vt-app" class="vt-app" data-state="empty">
-  <div class="vt-stage" id="vt-stage" tabindex="0">
-    <video id="vt-video" class="vt-video" playsinline preload="metadata"></video>
-
-    <div class="vt-placeholder" id="vt-placeholder">
-      <div class="vt-placeholder-mark" data-icon="play"></div>
-      <p class="vt-placeholder-title" id="vt-placeholder-title">Drop a video here</p>
-      <p class="vt-placeholder-hint">
-        <button type="button" class="vt-upload" data-vt="pick">Choose a video…</button>
-      </p>
-      <p class="vt-placeholder-hint vt-placeholder-local" id="vt-placeholder-local">
-        or <button type="button" class="vt-link" data-vt="browse">browse this machine</button>
-        for a file already on it
-      </p>
-      <p class="vt-placeholder-note" id="vt-output-note"></p>
-    </div>
-
-    <div class="vt-flash vt-flash-left" id="vt-flash-left"><span>&laquo; 5s</span></div>
-    <div class="vt-flash vt-flash-right" id="vt-flash-right"><span>5s &raquo;</span></div>
-    <div class="vt-toast" id="vt-toast"></div>
-
-    <div class="vt-panel" id="vt-panel">
-      <div class="vt-scrub" id="vt-scrub" role="slider" aria-label="Seek"
-           aria-valuemin="0" aria-valuenow="0" aria-valuemax="0" tabindex="-1">
-        <div class="vt-track">
-          <div class="vt-buffer" id="vt-buffer"></div>
-          <div class="vt-ab-fill" id="vt-ab-fill"></div>
-          <div class="vt-played" id="vt-played"></div>
-          <div class="vt-mark vt-mark-a" id="vt-mark-a"><span>A</span></div>
-          <div class="vt-mark vt-mark-b" id="vt-mark-b"><span>B</span></div>
-          <div class="vt-handle" id="vt-handle"></div>
-        </div>
-      </div>
-
-      <div class="vt-row">
-        <div class="vt-time">
-          <div class="vt-time-main"><span id="vt-pos">0:00.0</span><i>/</i><span id="vt-dur">0:00</span></div>
-          <div class="vt-time-ab" id="vt-time-ab">no A-B range</div>
-        </div>
-
-        <div class="vt-buttons">
-          <button type="button" class="vt-btn" data-vt="stop" data-icon="stop"
-                  title="Stop — back to A (Home)"></button>
-          <button type="button" class="vt-btn" data-vt="back5" data-icon="back5"
-                  title="Back 5 seconds (&larr;)"></button>
-          <button type="button" class="vt-btn" data-vt="prev-frame" data-icon="prevFrame"
-                  title="Previous frame (,)"></button>
-          <button type="button" class="vt-btn vt-btn-primary" data-vt="play" data-icon="play"
-                  title="Play / pause (Space)"></button>
-          <button type="button" class="vt-btn" data-vt="next-frame" data-icon="nextFrame"
-                  title="Next frame (.)"></button>
-          <button type="button" class="vt-btn" data-vt="fwd5" data-icon="fwd5"
-                  title="Forward 5 seconds (&rarr;)"></button>
-          <button type="button" class="vt-btn" data-vt="repeat" data-icon="repeat"
-                  title="Repeat the A-B range (R)"></button>
-          <button type="button" class="vt-btn vt-btn-ab" data-vt="marker"
-                  title="Cycle the A-B markers (B)">A-B</button>
-          <button type="button" class="vt-btn" data-vt="clip" data-icon="clip"
-                  title="Save the A-B clip (C)" disabled></button>
-          <button type="button" class="vt-btn" data-vt="screenshot" data-icon="camera"
-                  title="Save this frame (S)"></button>
-          <button type="button" class="vt-btn" data-vt="mute" data-icon="volumeOn"
-                  title="Mute (M)"></button>
-          <button type="button" class="vt-btn" data-vt="fullscreen" data-icon="fullscreen"
-                  title="Fullscreen (F)"></button>
-          <button type="button" class="vt-btn" data-vt="browse" data-icon="folder"
-                  title="Open a video (O)"></button>
-        </div>
-      </div>
-    </div>
-
-    <div class="vt-sheet" id="vt-sheet" hidden>
-      <div class="vt-sheet-card">
-        <header>
-          <span id="vt-sheet-dir">&nbsp;</span>
-          <button type="button" class="vt-sheet-close" data-vt="sheet-close" title="Close">&times;</button>
-        </header>
-        <nav id="vt-sheet-shortcuts"></nav>
-        <ul id="vt-sheet-list"></ul>
-      </div>
-    </div>
-  </div>
-
-  <div class="vt-saved" id="vt-saved" hidden>
-    <span class="vt-saved-label">Saved to <code id="vt-saved-dir"></code> &mdash; download:</span>
-    <ul id="vt-saved-list"></ul>
-  </div>
-
-  <input type="file" id="vt-file-input" accept="video/*" hidden />
-</div>
-"""
+""" + PLAYER_MARKUP
 
 HELP_MARKDOWN = """
 **Gestures** — single tap pins the controls up (tap the video again to dismiss).
@@ -925,11 +874,18 @@ third for &plus;5s. While paused the controls never hide themselves.
 `Shift+←`/`→` ∓1 frame &middot; `↑`/`↓` volume &middot; `Home` stop (back to A)
 &middot; `B` cycle A-B &middot; `R` repeat &middot; `M` mute &middot; `S`
 screenshot &middot; `C` save the A-B clip &middot; `F`/`F11` fullscreen &middot;
-`O` open &middot; `Esc` leave fullscreen.
+`O` open &middot; `G` export options &middot; `Esc` close the options or leave
+fullscreen.
 
 **A-B looping** — first tap of **A-B** sets A, the second sets B, the third
 clears both. Once both exist the range is the whole world: seeks and the ±5s
 skips clamp inside it, **Stop** returns to A, and **Repeat** wraps B back to A.
+
+**Export options** — the gear in the control bar opens frame size, compression,
+encoder speed, frame rate and audio, with a running estimate of how large the
+export will be. The estimate for the *whole video* is the largest it can get:
+A at the very start, B at the very end. Options apply to the clip only — stills
+are always saved at the source's own resolution.
 
 **Saving** — both outputs are rendered by ffmpeg on the machine running this
 server, into that machine's own working folder, and then copied into the save
@@ -1052,6 +1008,7 @@ def create_app(allow_remote_files=False, proxy_height=720, store=None,
     os.environ["GRADIO_TEMP_DIR"] = str(GRADIO_TEMP)
 
     _sweep_cache()
+    sweep_posters()
     state = VideoTrimWeb(
         store or Store(),
         allow_remote_files=allow_remote_files,
@@ -1072,6 +1029,7 @@ def create_app(allow_remote_files=False, proxy_height=720, store=None,
     _register_shell_routes(app, state)
     _register_routes(app, state)
     register_transfer_routes(app, state)
+    register_library_routes(app, state)
     register_admin_routes(app, state)
 
     demo = build_blocks(state)

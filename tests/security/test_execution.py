@@ -14,18 +14,31 @@ from pathlib import Path
 
 import pytest
 
-from videotrim import ffmpeg_tools
+from videotrim import encoding, ffmpeg_tools
 from videotrim.ffmpeg_tools import PROTOCOL_WHITELIST, FFmpegError, UntrustedExecutable
 
 
-BUILDERS = ["clip_command", "frame_command", "proxy_command"]
+BUILDERS = ["clip_command", "frame_command", "proxy_command", "poster_command",
+            "clip_command_with_options"]
 
 
 def _build(name, ffmpeg, source, target):
     if name == "clip_command":
         return ffmpeg_tools.clip_command(ffmpeg, source, target, 1000, 5000)
+    if name == "clip_command_with_options":
+        # The gear menu's options must not be able to move the whitelist, drop
+        # -n, or otherwise change the shape of the invocation.
+        options = encoding.normalize(
+            {"width": 640, "crf": 30, "preset": "medium", "fps_cap": 24,
+             "audio_kbps": 0},
+            source_width=1920, source_height=1080,
+        )
+        return ffmpeg_tools.clip_command(ffmpeg, source, target, 1000, 5000,
+                                         options=options)
     if name == "frame_command":
         return ffmpeg_tools.frame_command(ffmpeg, source, target, 1000)
+    if name == "poster_command":
+        return ffmpeg_tools.poster_command(ffmpeg, source, target, 3000, 320)
     return ffmpeg_tools.proxy_command(ffmpeg, source, target, 720)
 
 
@@ -113,6 +126,12 @@ def test_extract_frame_refuses_an_external_target(tmp_path):
     with pytest.raises(FFmpegError):
         ffmpeg_tools.extract_frame("ffmpeg", tmp_path / "in.mp4",
                                    tmp_path / "outside.png", 0)
+
+
+def test_extract_poster_refuses_an_external_target(tmp_path):
+    with pytest.raises(FFmpegError):
+        ffmpeg_tools.extract_poster("ffmpeg", tmp_path / "in.mp4",
+                                    tmp_path / "outside.jpg", 0)
 
 
 def test_filenames_with_shell_metacharacters_stay_inert(tmp_path):
