@@ -141,6 +141,58 @@ def validate_external_read(path):
     return target
 
 
+class OutsideRootError(FilesystemPolicyError):
+    """A relative path escaped the directory it was supposed to stay inside."""
+
+
+def resolve_within_root(root, relative):
+    """Resolve a client-supplied relative path underneath ``root``.
+
+    The file browser is the only feature that lets a client name a path at all,
+    so this is the function that decides what "inside the save folder" means. It
+    is deliberately strict:
+
+      - the value must be relative, with no drive letter and no UNC prefix;
+      - ``..`` is rejected outright rather than collapsed, because collapsing
+        first and checking later is how a check ends up looking at a different
+        string than the one that gets opened;
+      - the *resolved* result must still be under the resolved root, which is
+        what makes a symlink pointing out of the save folder a refusal rather
+        than a way out of it.
+
+    Reading is all any caller may do with what comes back. Nothing in this
+    module gives an external path a write capability, and this changes nothing
+    about that.
+    """
+    base = _resolved(root)
+    text = str(relative or "").replace("\\", "/").strip()
+    while text.startswith("/"):
+        text = text[1:]
+
+    if not text:
+        return base
+
+    if _CONTROL_CHARS and any(character in text for character in _CONTROL_CHARS):
+        raise OutsideRootError("That name contains control characters.")
+    if ":" in text:
+        # A drive letter, or an NTFS alternate data stream. Neither is a
+        # relative path inside the save folder.
+        raise OutsideRootError("That is not a path inside the save folder.")
+
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise OutsideRootError("That path points outside the save folder.")
+
+    target = base
+    for part in parts:
+        target = target / part
+
+    resolved = _resolved(target)
+    if resolved != base and base not in resolved.parents:
+        raise OutsideRootError("That path points outside the save folder.")
+    return resolved
+
+
 # --- output root -------------------------------------------------------------
 def validate_output_root(path):
     """Resolve and vet the save location. Never creates it.

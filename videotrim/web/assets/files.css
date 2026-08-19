@@ -1,0 +1,482 @@
+/* Files — the save-folder browser.
+ *
+ * Sits on top of shell.css (the glass surfaces, the header, the buttons) and
+ * player.css (which the same page loads for the player it swaps in). Only what
+ * is genuinely new lives here: the crumb bar, the segmented controls, the
+ * details table, the icon grid, the picture viewer and the player shell.
+ *
+ * Icon sizes are one custom property. A view is a class that sets it, so
+ * "medium" and "extra large" are the same layout at two numbers rather than
+ * four grids that drift apart.
+ */
+
+.vt-files-frame { max-width: 1240px; }
+
+/* .vt-tool sets display:grid, which outranks the hidden attribute on its own.
+   Opening a video hides the listing rather than unmounting it, so this is what
+   makes that swap actually happen. */
+main.vt-files[hidden] { display: none; }
+
+.vt-files-card {
+  padding: clamp(14px, 2.4vw, 22px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- where you are -------------------------------------------------------- */
+.vt-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+
+button.vt-crumb {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: var(--vt-radius-pill, 999px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--vt-ink-soft, #a8bccd);
+  font: inherit;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+button.vt-crumb:hover { background: rgba(255, 255, 255, 0.07); color: var(--vt-ink, #eaf1f7); }
+
+button.vt-crumb[aria-current="true"] {
+  color: var(--vt-ink, #eaf1f7);
+  font-weight: 640;
+}
+
+button.vt-crumb-up {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  padding: 0;
+  border-color: var(--vt-edge, rgba(160, 200, 230, 0.14));
+}
+
+button.vt-crumb-up svg { width: 18px; height: 18px; }
+
+.vt-crumb-sep { color: var(--vt-ink-faint, #7d94a8); }
+
+.vt-files-where {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--vt-ink-faint, #7d94a8);
+}
+
+/* --- the control strip ---------------------------------------------------- */
+.vt-files-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.vt-files-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vt-seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--vt-radius-pill, 999px);
+  border: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+  flex-wrap: wrap;
+}
+
+button.vt-seg-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--vt-radius-pill, 999px);
+  background: transparent;
+  color: var(--vt-ink-soft, #a8bccd);
+  font: inherit;
+  font-size: 0.84rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+button.vt-seg-button:hover { background: rgba(255, 255, 255, 0.08); color: var(--vt-ink, #eaf1f7); }
+
+button.vt-seg-button[data-on="1"] {
+  background: var(--vt-accent, #6fd2e2);
+  color: var(--vt-accent-ink, #062028);
+  font-weight: 640;
+}
+
+.vt-files-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.82rem;
+  color: var(--vt-ink-faint, #7d94a8);
+}
+
+.vt-files-sort select {
+  height: 34px;
+  min-width: 132px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-ink, #eaf1f7);
+  font: inherit;
+  font-size: 0.84rem;
+}
+
+button.vt-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--vt-ink-soft, #a8bccd);
+  cursor: pointer;
+}
+
+button.vt-icon-button:hover { background: rgba(255, 255, 255, 0.1); color: var(--vt-ink, #eaf1f7); }
+
+button.vt-icon-button svg { width: 18px; height: 18px; }
+
+/* The arrow flips rather than being swapped for a second glyph. */
+button#vt-files-order[data-order="desc"] svg { transform: scaleY(-1); }
+
+.vt-columns-menu {
+  padding: 12px 14px;
+  border-radius: var(--vt-radius-sm, 13px);
+  border: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.vt-columns-title {
+  margin: 0 0 8px;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vt-ink-faint, #7d94a8);
+}
+
+#vt-files-columns-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.vt-column-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.vt-column-choice input { accent-color: var(--vt-accent, #6fd2e2); width: 17px; height: 17px; }
+
+/* --- the listing itself --------------------------------------------------- */
+.vt-files-body { min-height: 180px; }
+
+.vt-files-body .vt-empty {
+  margin: 28px 0;
+  text-align: center;
+  color: var(--vt-ink-faint, #7d94a8);
+}
+
+/* Details */
+table.vt-files-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+table.vt-files-table th {
+  text-align: left;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  font-weight: 500;
+}
+
+table.vt-files-table th[data-align="right"],
+table.vt-files-table td[data-align="right"] { text-align: right; }
+
+button.vt-sort-head {
+  border: 0;
+  background: transparent;
+  color: var(--vt-ink-faint, #7d94a8);
+  font: inherit;
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+
+button.vt-sort-head:hover { color: var(--vt-ink, #eaf1f7); }
+
+button.vt-sort-head[data-sorted]::after {
+  content: " ▲";
+  font-size: 0.7em;
+  color: var(--vt-accent, #6fd2e2);
+}
+
+button.vt-sort-head[data-sorted="desc"]::after { content: " ▼"; }
+
+tr.vt-file-row { cursor: pointer; }
+
+tr.vt-file-row:hover,
+tr.vt-file-row:focus-visible {
+  background: rgba(255, 255, 255, 0.05);
+  outline: none;
+}
+
+table.vt-files-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: var(--vt-ink-soft, #a8bccd);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+td.vt-file-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--vt-ink, #eaf1f7);
+  max-width: none;
+}
+
+.vt-file-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--vt-ink-faint, #7d94a8);
+}
+
+tr.vt-file-row[data-kind="folder"] .vt-file-icon { color: var(--vt-accent, #6fd2e2); }
+
+.vt-file-icon svg { width: 20px; height: 20px; }
+
+/* Icons */
+.vt-files-body[data-view="small"] { --vt-tile: 96px; }
+.vt-files-body[data-view="medium"] { --vt-tile: 150px; }
+.vt-files-body[data-view="large"] { --vt-tile: 210px; }
+.vt-files-body[data-view="huge"] { --vt-tile: 290px; }
+
+.vt-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--vt-tile, 150px), 1fr));
+  gap: 12px;
+}
+
+button.vt-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--vt-radius-sm, 13px);
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--vt-ink, #eaf1f7);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.vt-tile:hover,
+button.vt-tile:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--vt-edge-bright, rgba(180, 215, 240, 0.26));
+  outline: none;
+}
+
+.vt-tile-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--vt-ink-faint, #7d94a8);
+  overflow: hidden;
+}
+
+.vt-tile[data-kind="folder"] .vt-tile-thumb { color: var(--vt-accent, #6fd2e2); }
+
+.vt-tile-thumb svg { width: 42%; height: 42%; }
+
+/* The picture sits over the glyph and is only shown once it has loaded, so a
+   tile never flashes empty and a failed poster leaves the glyph in place. */
+.vt-tile-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.vt-tile-thumb[data-thumb="1"] img { opacity: 1; }
+
+.vt-tile-thumb[data-thumb="1"] svg { visibility: hidden; }
+
+/* A video reads as a video even once its poster has landed. */
+.vt-tile[data-kind="video"] .vt-tile-thumb[data-thumb="1"]::after {
+  content: "";
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.62) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%23ffffff'%3E%3Cpath d='M7 4.6l9 5.4-9 5.4z'/%3E%3C/svg%3E") center / 11px no-repeat;
+}
+
+.vt-tile-name {
+  font-size: 0.84rem;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.vt-tile-meta {
+  font-size: 0.74rem;
+  color: var(--vt-ink-faint, #7d94a8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vt-files-body[data-view="small"] .vt-tile-meta { display: none; }
+
+/* --- the picture viewer --------------------------------------------------- */
+.vt-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 12px 24px;
+  background: rgba(4, 7, 11, 0.93);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.vt-lightbox[hidden] { display: none; }
+
+.vt-lightbox-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.vt-lightbox-name {
+  font-size: 0.9rem;
+  color: var(--vt-ink-soft, #a8bccd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vt-lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+a.vt-lightbox-download { text-decoration: none; }
+
+.vt-lightbox-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+button.vt-lightbox-step {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  left: 10px;
+  width: 46px;
+  height: 62px;
+  border-radius: 12px;
+  border: 1px solid var(--vt-edge, rgba(160, 200, 230, 0.14));
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--vt-ink, #eaf1f7);
+  font-size: 1.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.vt-lightbox-next { left: auto; right: 10px; }
+
+button.vt-lightbox-step:hover { background: rgba(255, 255, 255, 0.14); }
+
+/* --- the player, when a video is open ------------------------------------- */
+.vt-player-shell {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 0 clamp(14px, 3vw, 28px) 56px;
+}
+
+.vt-player-shell[hidden] { display: none; }
+
+/* There is less above the player here than on the Video Trim page — a back bar
+   rather than a heading, a source row and a description — so the stage may have
+   the height that leaves. */
+body[data-view="files"] #vt-app .vt-stage {
+  height: min(56.25vw, calc(100vh - 210px));
+}
+
+.vt-player-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 0 12px;
+}
+
+.vt-player-name {
+  font-size: 0.94rem;
+  color: var(--vt-ink-soft, #a8bccd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .vt-files-controls { align-items: stretch; }
+  .vt-files-right { justify-content: space-between; }
+  table.vt-files-table td { max-width: 160px; }
+}

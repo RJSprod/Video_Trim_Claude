@@ -58,7 +58,7 @@ class MediaRegistry:
 
     # What a token was created under, so a browse token cannot be replayed as
     # something more privileged.
-    CAPABILITIES = ("host_browse", "upload", "proxy", "saved_output")
+    CAPABILITIES = ("host_browse", "upload", "proxy", "saved_output", "library")
 
     def __init__(self):
         self._lock = threading.Lock()

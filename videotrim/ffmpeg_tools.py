@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import encoding
 from .security.fs_boundary import INSTALL_ROOT, is_internal
 
 # Keep the console window from flashing up on Windows for every ffmpeg call.
@@ -283,15 +284,23 @@ def probe_video(path, ffmpeg=None, ffprobe=None):
 
 
 # --- commands ----------------------------------------------------------------
-def clip_command(ffmpeg, source, target, a_ms, b_ms, progress=True):
+def clip_command(ffmpeg, source, target, a_ms, b_ms, progress=True, options=None):
     """The A-B trim. Re-encodes so the cut starts exactly on marker A.
 
     ``target`` is always a fresh path inside the app's own cache. ffmpeg never
     points at anything outside the installation, which is why ``-n`` here is
     belt-and-braces rather than the thing standing between a user's file and an
     overwrite — that job belongs to the exclusive-create gateway.
+
+    ``options`` is what the player's gear menu chose: frame size, CRF, encoder
+    preset, a frame-rate cap and the audio bitrate. It is normalized before it
+    gets here, so every value below is a bounded number or one of a fixed set of
+    words — none of it is a string that came from a browser.
     """
     duration_ms = max(1, int(b_ms) - int(a_ms))
+    # Already vetted against the source by encoding.normalize(); bounded again
+    # here so this builder is safe to call with whatever a caller hands it.
+    settings = encoding.command_settings(options)
     command = [
         ffmpeg,
         "-hide_banner",
@@ -305,15 +314,30 @@ def clip_command(ffmpeg, source, target, a_ms, b_ms, progress=True):
         "-i", str(source),
         "-t", f"{duration_ms / 1000.0:.3f}",
         "-map", "0:v:0?",
-        "-map", "0:a:0?",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-movflags", "+faststart",
     ]
+    if settings["audio_kbps"]:
+        command += ["-map", "0:a:0?"]
+
+    scale = encoding.scale_filter(settings)
+    if scale:
+        command += ["-vf", scale]
+    if settings["fps_cap"]:
+        # A cap, never an increase: -r above the source rate would duplicate
+        # frames and make the file bigger for nothing.
+        command += ["-r", str(int(settings["fps_cap"]))]
+
+    command += [
+        "-c:v", "libx264",
+        "-preset", str(settings["preset"]),
+        "-crf", str(int(settings["crf"])),
+        "-pix_fmt", "yuv420p",
+    ]
+    if settings["audio_kbps"]:
+        command += ["-c:a", "aac", "-b:a", f"{int(settings['audio_kbps'])}k"]
+    else:
+        command += ["-an"]
+    command += ["-movflags", "+faststart"]
+
     if progress:
         command += ["-progress", "pipe:1", "-nostats"]
     return command + [str(target)]
@@ -372,6 +396,51 @@ def proxy_command(ffmpeg, source, target, height=720, progress=True):
     if progress:
         command += ["-progress", "pipe:1", "-nostats"]
     return command + [str(target)]
+
+
+def poster_command(ffmpeg, source, target, position_ms=0, width=480):
+    """One small JPEG for the file browser's icon views.
+
+    Written into the app's own cache and served from there, so a folder of a
+    hundred videos costs one decode each rather than one per page view. Same
+    protocol whitelist as everything else: a poster is still ffmpeg opening a
+    file somebody else wrote.
+    """
+    width = max(64, min(1280, int(width)))
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel", "error",
+        "-n",
+        *PROTOCOL_WHITELIST,
+        "-ss", f"{max(0, int(position_ms)) / 1000.0:.3f}",
+        "-i", str(source),
+        "-frames:v", "1",
+        "-vf", f"scale={width}:-2:flags=fast_bilinear",
+        "-f", "image2",
+        "-c:v", "mjpeg",
+        "-q:v", "5",
+        str(target),
+    ]
+
+
+def extract_poster(ffmpeg, source, target, position_ms=0, width=480):
+    """Render a poster into an internal path, retrying at the first frame.
+
+    A short clip seeked past its own end produces no output at all, which would
+    leave the browser showing a broken tile for a perfectly good file. So the
+    seek is a preference, not a requirement.
+    """
+    if not is_internal(target):
+        raise FFmpegError("Refusing to render to a path outside the installation.")
+    for position in (max(0, int(position_ms)), 0):
+        result = _run(poster_command(ffmpeg, source, target, position, width), timeout=30)
+        if result.returncode == 0 and Path(target).is_file():
+            return Path(target)
+        if position == 0:
+            break
+    raise FFmpegError("No frame could be read from that file.")
 
 
 # --- running -----------------------------------------------------------------
