@@ -460,8 +460,12 @@ PLAYER_MARKUP = """
                   title="Repeat the A-B range (R)"></button>
           <button type="button" class="vt-btn vt-btn-ab" data-vt="marker"
                   title="Cycle the A-B markers (B)">A-B</button>
-          <button type="button" class="vt-btn" data-vt="clip" data-icon="clip"
-                  title="Save the A-B clip (C)" disabled></button>
+          <button type="button" class="vt-btn" data-vt="clip" data-icon="saveVideo"
+                  title="Save the A-B range as video (C)"
+                  aria-label="Save the A-B range as video" disabled></button>
+          <button type="button" class="vt-btn" data-vt="audio" data-icon="saveAudio"
+                  title="Save the A-B range as audio only, MP3 (A)"
+                  aria-label="Save the A-B range as audio only, MP3" disabled></button>
           <button type="button" class="vt-btn" data-vt="screenshot" data-icon="camera"
                   title="Save this frame (S)"></button>
           <button type="button" class="vt-btn" data-vt="options" data-icon="gear"

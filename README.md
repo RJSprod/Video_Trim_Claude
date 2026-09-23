@@ -4,7 +4,7 @@ A touch-friendly media app for your own machine and the devices around it. Sign
 in, and Home offers the tools:
 
 - **Video Trim** — mark a VLC-style A-B loop, watch it repeat, then save that
-  exact span as a clip or grab a full-resolution still.
+  exact span as a clip, save just its sound as an MP3, or grab a full-resolution still.
 - **Media Transfer** — send photos and videos from a phone or laptop to the
   host's save folder.
 - **Files** — browse the save folder from any signed-in device: icons or
@@ -257,7 +257,7 @@ From there:
 | --- | --- |
 | Play, mark A-B, scrub, step frames | Nothing |
 | **Screenshot** | Just the PNG. Captured in the browser at the source's own pixel size. |
-| **Save clip** | The video, at that moment — because cutting needs ffmpeg. |
+| **Save clip** / **Save audio** | The video, at that moment — because cutting needs ffmpeg. |
 
 So if you only ever take stills, the video never travels. The clip is the one
 case that needs the source on the host, and it is sent when you press the button
@@ -456,7 +456,8 @@ The bar along the bottom, left to right:
 | » 5 | Forward 5 seconds. |
 | ⟳ Repeat | Loop the A-B range, or the whole file when no range is set. |
 | **A-B** | Cycles the loop markers — see below. |
-| ⭳ Save clip | Saves the current A-B range to the host's save folder. Disabled until both markers exist. |
+| Save video (frame + ↓) | Saves the current A-B range as a video to the host's save folder. Disabled until both markers exist. |
+| Save audio (note + ↓) | Saves only the sound of the A-B range, as a stereo MP3 at 192 kbps. Disabled until both markers exist. The web app only. |
 | ⛶ Screenshot | Saves the frame on screen there as a PNG. |
 | ⚙ Export options | Frame size, compression, encoder speed, frame rate and audio, with a running size estimate. Web app only — see below. |
 | 🔊 Mute | Toggles audio. |
@@ -571,6 +572,7 @@ the controls never auto-hide at all.
 | `,` / `.` | ∓1 frame | | `M` | Mute |
 | `Shift+←` / `→` | ∓1 frame | | `S` | Screenshot |
 | `↑` / `↓` | Volume | | `C` | Save the A-B clip |
+| | | | `A` | Save the A-B audio as MP3 (web) |
 | `Home` | Stop (back to A) | | `F` / `F11` | Fullscreen |
 | `O` / `Ctrl+O` | Open a video | | `G` | Export options (web) |
 | | | | `Esc` | Close the options, or leave fullscreen |
@@ -613,6 +615,7 @@ you can check it yourself. Video Trim will not delete, repair or overwrite it.
 
 ```
 MyVideo_clip_01m23.4s_to_01m45.9s.mp4
+MyVideo_audio_01m23.4s_to_01m45.9s.mp3
 MyVideo_frame_01m23.4s.png
 ```
 
@@ -623,6 +626,13 @@ keyframe. A few seconds of work for a short clip. Export runs on a worker thread
 with a live percentage, so the UI keeps playing throughout. Both front ends build
 that ffmpeg command from the same function, so a clip cut in the browser is the
 same job as one cut in the window.
+
+**Audio only** uses the same markers and the same frame-accurate cut, and saves
+the first audio track as an MP3: always **stereo, 192 kbps constant bitrate,
+48 kHz** — about 1.4 MB a minute. A mono track plays on both channels and
+surround is folded down to stereo. A video with no sound says so rather than
+saving an empty file. The gear menu's options are for the picture and don't
+apply here.
 
 **Screenshots** are the source frame at native resolution — a still from a 4K video
 is 3840×2160 no matter how small the window is — with no controls baked in. The
