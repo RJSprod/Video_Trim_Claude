@@ -100,12 +100,13 @@ def settings_sections_for(host_admin):
 
 
 def capabilities(session, host_admin, can_browse, can_write, settings, journal=None,
-                 pending_requests=0, partial_notices=0):
+                 pending_requests=0, partial_notices=0, transport_note=TRANSPORT_WARNING):
     """The whole authenticated client picture, in one response.
 
     ``output_path`` is present only for host-local sessions. Everyone gets
     ``output_display_name``, which is a label and never a filesystem path — the
-    same rule applies to every string this shell produces.
+    same rule applies to every string this shell produces. ``transport_note``
+    describes the connection the request actually arrived on.
     """
     sections = settings_sections_for(host_admin)
     payload = {
@@ -120,7 +121,7 @@ def capabilities(session, host_admin, can_browse, can_write, settings, journal=N
         "settings_sections": sections,
         "output_configured": settings.is_configured(),
         "output_display_name": settings.destination_for(False),
-        "transport_warning": TRANSPORT_WARNING,
+        "transport_note": transport_note,
     }
     if host_admin:
         payload["output_path"] = settings.destination_for(True)
@@ -180,7 +181,7 @@ def render_page(title, view, body, version, stylesheet="shell.css", script="shel
     )
 
 
-def login_page(version, message=""):
+def login_page(version, message="", transport_note=TRANSPORT_WARNING):
     """The only unauthenticated surface in the application."""
     note = f'<p class="vt-login-error" role="alert">{html.escape(message)}</p>' if message else ""
     body = f"""
@@ -204,7 +205,7 @@ def login_page(version, message=""):
       <p class="vt-status" id="vt-login-status" role="status" aria-live="polite"></p>
     </form>
   </div>
-  <p class="vt-transport-note">{html.escape(TRANSPORT_WARNING)}</p>
+  <p class="vt-transport-note">{html.escape(transport_note)}</p>
 </main>
 """
     return render_page(f"Sign in — {PRODUCT_NAME}", "login", body, version,
@@ -264,7 +265,7 @@ def transfer_page(version):
     return render_page(f"Media Transfer — {PRODUCT_NAME}", "transfer", body, version)
 
 
-def settings_page(version):
+def settings_page(version, transport_note=TRANSPORT_WARNING):
     body = f"""
 <div class="vt-shell-frame">
   {_header(home=True, title="Settings")}
@@ -323,7 +324,7 @@ def settings_page(version):
       <ul class="vt-notice-list" id="vt-notice-list"></ul>
     </section>
 
-    <p class="vt-transport-note">{html.escape(TRANSPORT_WARNING)}</p>
+    <p class="vt-transport-note">{html.escape(transport_note)}</p>
   </main>
 </div>
 """

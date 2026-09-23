@@ -11,6 +11,11 @@ python-multipart>=0.0.9
 # fallback scheme, and the app refuses to start if this is missing.
 argon2-cffi>=23.1
 
+# HTTPS: makes and checks the certificate the web UI serves by default. PyCA's
+# maintained primitives — there is no home-made fallback, and without this the
+# app will not serve HTTPS (it says so and stops, rather than falling back).
+cryptography>=43
+
 # Supplies a bundled ffmpeg binary so clip export and stills work without a
 # separate install. If ffmpeg is already on PATH this is optional.
 imageio-ffmpeg>=0.4.9

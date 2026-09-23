@@ -36,7 +36,7 @@ from ..config.store import CommitJournal, Store
 from ..ffmpeg_tools import FFmpegError
 from ..naming import clip_name, frame_name
 from ..paths import desktop_dir, sanitize
-from ..security import fs_boundary
+from ..security import fs_boundary, tls
 from ..security.auth import COOKIE_NAME, AuthError, AuthService, LoginThrottle
 from ..security.auth import AccessRequestThrottle
 from ..security.fs_boundary import CommitDenied, ExternalReadError
@@ -127,8 +127,11 @@ class VideoTrimWeb:
     """Holds the pieces one server instance needs: security, storage, ffmpeg."""
 
     def __init__(self, store, allow_remote_files=False, proxy_height=720,
-                 tunnel_active=False):
+                 tunnel_active=False, transport=None):
         self.store = store
+        # How the launcher is serving (tls.Transport), for what the pages say
+        # about the connection. None when the app is built without a launcher.
+        self.transport = transport
         self.settings = SettingsService(store)
         self.journal = CommitJournal(store)
         self.registry = MediaRegistry()
@@ -167,6 +170,18 @@ class VideoTrimWeb:
 
     def is_host_admin(self, request):
         return self.host_guard.is_host_request(request)
+
+    def transport_note(self, request):
+        """What a page says about the connection this request arrived on.
+
+        Decided per request from the scheme it actually used, so the page can
+        never call a plain-HTTP connection encrypted, or the reverse.
+        """
+        return tls.transport_note(
+            request.url.scheme,
+            mode=getattr(self.transport, "mode", None),
+            tunnel_active=self.host_guard.tunnel_active,
+        )
 
     def can_browse(self, request):
         return self.browse_guard.can_browse_host_paths(request)
@@ -259,7 +274,8 @@ def _register_shell_routes(app, state):
         # Already signed in? There is nothing to do here.
         if state.session_for(request) is not None:
             return _redirect("/")
-        return HTMLResponse(shell.login_page(state.asset_version))
+        return HTMLResponse(shell.login_page(
+            state.asset_version, transport_note=state.transport_note(request)))
 
     @app.post("/api/login")
     async def login(request: Request):
@@ -340,7 +356,8 @@ def _register_shell_routes(app, state):
                 status_code=403,
                 detail="Settings can only be opened on the machine running Video Trim.",
             )
-        return HTMLResponse(shell.settings_page(state.asset_version))
+        return HTMLResponse(shell.settings_page(
+            state.asset_version, transport_note=state.transport_note(request)))
 
     @app.get("/vt/api/capabilities")
     def capabilities(request: Request):
@@ -361,6 +378,7 @@ def _register_shell_routes(app, state):
             journal=state.journal,
             pending_requests=pending,
             partial_notices=partials,
+            transport_note=state.transport_note(request),
         )
 
 
@@ -1000,8 +1018,13 @@ def _filtered(func, wanted):
 
 
 def create_app(allow_remote_files=False, proxy_height=720, store=None,
-               tunnel_active=False):
-    """Build the application: FastAPI routes, the Gradio tool, then the guard."""
+               tunnel_active=False, transport=None):
+    """Build the application: FastAPI routes, the Gradio tool, then the guard.
+
+    ``transport`` is the launcher's tls.Transport. HTTPS itself is Uvicorn's
+    job; the app only needs it to describe the connection honestly, while the
+    Secure cookie flag keeps following each request's own scheme.
+    """
     # Pinned before Gradio is touched, so its own temp handling stays inside the
     # install root rather than landing in the system temp directory.
     fs_boundary.ensure_internal_dir(GRADIO_TEMP)
@@ -1014,6 +1037,7 @@ def create_app(allow_remote_files=False, proxy_height=720, store=None,
         allow_remote_files=allow_remote_files,
         proxy_height=proxy_height,
         tunnel_active=tunnel_active,
+        transport=transport,
     )
     state.auth.purge_expired()
 
@@ -1038,6 +1062,9 @@ def create_app(allow_remote_files=False, proxy_height=720, store=None,
         demo,
         path=VIDEO_TRIM_ROUTE,
         **_filtered(gr.mount_gradio_app, {
+            # Must stay off: server-side rendering runs a Node process that calls
+            # back into this server, and would have to trust its self-signed
+            # certificate to do it.
             "ssr_mode": False,
             "show_error": True,
             # Uploads go through our own route; nothing needs Gradio's file access.

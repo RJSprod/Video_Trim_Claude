@@ -3,7 +3,7 @@
 #
 # The first run builds a "venv" folder next to this script and installs
 # everything into it; later runs reuse it and start straight away. The WebUI
-# opens at http://127.0.0.1:7862
+# opens at https://127.0.0.1:7862
 #
 #   ./start_linux.sh                 install if needed, then launch
 #   ./start_linux.sh --local-only    keep it to this machine only

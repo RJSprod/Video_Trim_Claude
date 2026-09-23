@@ -66,6 +66,42 @@ def is_loopback(raw):
         return False
 
 
+def primary_address():
+    """The IPv4 address this machine uses to reach its network, or "".
+
+    On a normal home network it is the one other devices can reach, which is
+    why the banner leads with it and the HTTPS certificate always covers it.
+    Connecting a UDP socket only consults the routing table: no packet is sent,
+    and nothing outside this machine is contacted.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # reserved documentation address; sends nothing
+        return normalize_ip(probe.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        probe.close()
+
+
+def hostname_addresses(family=0):
+    """Every address this machine's own hostname resolves to, best effort.
+
+    Noisier than it looks: on Windows it usually includes virtual adapters
+    (WSL, Hyper-V, VPNs) whose addresses change from one boot to the next.
+    """
+    found = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, family)
+    except (OSError, socket.gaierror):
+        return found
+    for info in infos:
+        address = normalize_ip(info[4][0])
+        if address and address not in found:
+            found.append(address)
+    return found
+
+
 def own_addresses():
     """Every address that means "this machine".
 
@@ -73,22 +109,8 @@ def own_addresses():
     sitting at the host must not look like a stranger — otherwise Settings
     vanish for the one person entitled to them.
     """
-    found = set()
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None):
-            found.add(normalize_ip(info[4][0]))
-    except (OSError, socket.gaierror):
-        pass
-
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        probe.connect(("192.0.2.1", 9))  # reserved documentation address; sends nothing
-        found.add(normalize_ip(probe.getsockname()[0]))
-    except OSError:
-        pass
-    finally:
-        probe.close()
-
+    found = set(hostname_addresses())
+    found.add(primary_address())
     found.discard("")
     return frozenset(found)
 

@@ -67,10 +67,17 @@ commit.
 
 ## What it does not protect against
 
-- **Traffic on your network.** Over plain HTTP the session cookie travels in the
-  clear, and anyone able to capture traffic on the network segment can take over
-  a session. `HttpOnly` and `SameSite` do nothing about a passive sniffer. Put it
-  behind HTTPS via a reverse proxy if that matters to you.
+- **Proving the server's identity on first contact.** Serving the network is
+  HTTPS by default, so a passive sniffer sees nothing useful. But the certificate
+  is one Video Trim generated itself, and no public authority vouches for it:
+  the first time a device connects, its browser warns, and accepting that
+  warning is a leap of faith. Compare the fingerprint the launcher prints before
+  you accept, or supply a certificate your devices already trust — see
+  [HTTPS](#https).
+- **Traffic with `--http`.** Asking for plain HTTP means the session cookie and
+  your media cross the network in the clear, and anyone able to capture traffic
+  on the network segment can take over a session. `HttpOnly` and `SameSite` do
+  nothing about a passive sniffer.
 - **Device identity.** Write permission follows an *IP address*. If DHCP moves a
   device to a new address it needs allowing again, and devices behind one NAT
   address share one permission. It is LAN convenience control, not device
@@ -96,28 +103,37 @@ Double-click the launcher for your platform:
 | macOS | `./start_macos.sh` |
 
 The first run creates a **`venv` folder inside this directory** and installs every
-dependency into it, then opens <http://127.0.0.1:7862> in your browser. Later runs
+dependency into it, then opens <https://127.0.0.1:7862> in your browser. Later runs
 see the venv is already good and start straight away.
 
-It is reachable from your other devices out of the box — no flags. The launcher
-prints the address to use:
+It is reachable from your other devices out of the box — no flags — and it is
+**HTTPS** out of the box too. The launcher prints the address to use:
 
 ```
   Video Trim
-  ├─ on this machine   http://127.0.0.1:7862
-  ├─ from elsewhere    http://192.168.1.42:7862
-  ├─                   …everyone must sign in, and a new device cannot save
-  ├─                   anything until you allow its address in Settings.
+  ├─ on this machine   https://127.0.0.1:7862
+  ├─ from elsewhere    https://192.168.1.42:7862
+  ├─                   …everyone must sign in, and a new device cannot save anything
+  ├─                   until you allow its address in Settings.
+  ├─                   Use --local-only to keep it to this machine.
   ├─ saving to         C:\Users\you\Pictures\Video Trim
-  └─ note              Video Trim protects against other people on your network
-                       using the app. It does not protect against someone who
-                       can capture traffic on your network.
+  ├─ ffmpeg            C:\Video_Trim_Claude\venv\...\ffmpeg.exe
+  ├─ transport         HTTPS (managed self-signed certificate)
+  ├─ certificate       data/tls/videotrim.crt (reused)
+  ├─ fingerprint       SHA-256 9D:2E:38:C9:E2:0D:ED:8D:91:93:B5:46:F0:11:32:BD
+  ├─                           63:DC:92:69:02:20:80:EC:E1:C0:9B:B5:4C:9F:A8:A1
+  └─ browser trust     Video Trim generated its own certificate to encrypt this
+                       connection. Browsers do not automatically trust locally
+                       generated certificates, so each device — this one included —
+                       may show a warning the first time. Video Trim does not modify
+                       any device's trust store.
 ```
 
-Open that second URL on a phone or laptop and sign in. Marking an A-B loop and
-saving a clip puts it in the **host's** save folder — the machine running the
-launcher — once you have allowed that device. See
-[From another machine](#from-another-machine) for what that does and doesn't allow.
+Open that second URL on a phone or laptop, get past the one-time certificate
+warning (see [HTTPS](#https)), and sign in. Marking an A-B loop and saving a clip
+puts it in the **host's** save folder — the machine running the launcher — once
+you have allowed that device. See [From another machine](#from-another-machine)
+for what that does and doesn't allow.
 
 Nothing is installed system-wide and nothing is written outside this folder, so
 deleting the folder uninstalls everything. All you need beforehand is Python 3.9+
@@ -126,7 +142,8 @@ on `PATH`; the launcher checks and tells you where to get it if not.
 ```
 Video_Trim_Claude/
   venv/            every dependency lives here          (created for you)
-  data/            credentials, settings, IP history    (created for you)
+  data/            credentials, settings, IP history,
+                   and the HTTPS certificate in data/tls/ (created for you)
   cache/           uploads, staging, transcoded previews (created for you)
   CMD_FLAGS.txt    flags applied to every launch
 ```
@@ -154,17 +171,67 @@ Put them after the launcher (`./start_linux.sh --local-only`) or one per line in
 
 | Flag | Effect |
 | --- | --- |
-| `--local-only` | Bind `127.0.0.1` only, so nothing outside this machine can reach it. |
+| `--local-only` | Bind `127.0.0.1` only, so nothing outside this machine can reach it. Served over plain HTTP, since loopback traffic never leaves the machine. |
 | `--listen-port 7862` | Serve on a different port. |
-| `--listen-host 192.168.1.5` | Bind one specific interface. |
+| `--listen-host 192.168.1.5` | Bind one specific interface. It goes into the certificate as-is. |
 | `--output-dir <folder>` | Set the save folder. Must already exist, and must sit outside this installation. Stored, so it is only needed once. |
-| `--share` | Also expose a temporary public `gradio.live` URL. Host Settings are hidden while a tunnel is up, because tunnelled traffic cannot be told apart from this machine's own. |
+| `--http` | Serve plain, **unencrypted** HTTP instead of HTTPS. An explicit choice — Video Trim never falls back to it on its own. |
+| `--tls-keyfile <key.pem>` `--tls-certfile <cert.pem>` | Use your own certificate instead of the generated one. Both together; PEM; the key without a passphrase. Only ever read. |
+| `--share` | Also expose a temporary public `gradio.live` URL. Host Settings are hidden while a tunnel is up, because tunnelled traffic cannot be told apart from this machine's own. The tunnel can only reach plain HTTP, so it needs `--local-only` (or `--http`). |
 | `--no-browser` | Don't open a browser window on start. |
 | `--any-port` | Use the next free port instead of stopping when 7862 is busy. |
 | `--allow-remote-files` | Also let signed-in visitors from other machines browse paths on **this** machine. Reading only — never Settings, credentials, the save location, or write permission. |
 | `--proxy-height 720` | Height of the preview built for codecs the browser can't play. |
 | `--update` / `--recreate` / `--desktop` | Installer actions — see below. |
 | `--change-auth` | Set a new username and password, then exit. |
+
+## HTTPS
+
+Serving your network means HTTPS, with nothing to set up. On the first launch
+Video Trim generates its own key and certificate in `data/tls/` and reuses them
+from then on. The session cookie is then marked `Secure` and neither it nor your
+media crosses the network in the clear.
+
+**The browser warning.** The certificate is *self-signed*: it encrypts the
+connection, but no public authority vouches for it, so each browser warns the
+first time — *"Your connection is not private"* or similar, on this machine too.
+That is expected. To be sure the warning is about *this* certificate, open the
+browser's certificate details and compare its SHA-256 fingerprint with the one
+the launcher printed, then proceed. Video Trim never installs anything into your
+operating system's or browser's trust store to hide the warning.
+
+**When it is plain HTTP instead.** Only when you ask for it with `--http`, or
+with `--local-only`, where the app listens on this machine alone and the traffic
+never leaves it. If HTTPS cannot be set up — a permission problem in `data/`, a
+missing `cryptography` package — the launcher stops and says why. It never
+quietly carries on over HTTP.
+
+**When the certificate changes.** Each new certificate brings the warning back on
+every device, so it is replaced only when it has to be: it is damaged, it
+expires within 30 days, or it doesn't name the address the launcher leads with
+(your machine moved to another network, say). Addresses that come and go —
+virtual adapters, VPNs — are added whenever a certificate is made, but never
+force a new one; the launcher lists any it doesn't cover. Every name an old
+certificate covered carries over into the next, so moving between two networks
+settles on one certificate. To start over, delete `data/tls/` and restart.
+
+**Your own certificate.** `--tls-keyfile` and `--tls-certfile` use a key and
+certificate you already have — from your own CA, or [mkcert](https://github.com/FiloSottile/mkcert)
+once its root is installed on your devices, which makes the warning go away. They
+must be PEM, the certificate file must start with the server certificate, and the
+key must not have a passphrase. Video Trim only reads them: it never rewrites,
+renames or changes the permissions of either. The launcher warns if the
+certificate has expired or doesn't name the addresses it prints.
+
+**`--share`.** Gradio's tunnel can only reach a plain-HTTP server, so `--share`
+is refused alongside HTTPS rather than printing a public link that could never
+load. Use `--share --local-only`: the public link is still HTTPS, and nothing on
+your network is unencrypted.
+
+**If a device plays nothing.** Some mobile browsers hand video to a system player
+that does not honour the warning you accepted for the page. If pages load but
+video will not play on a device, give it a certificate it trusts (above), or
+use `--http` for that session.
 
 ## Opening a video
 
@@ -251,7 +318,7 @@ on the next request — no restart. Turning it off cancels that device's in-flig
 work.
 
 `--local-only` restores loopback-only binding if you would rather nothing else
-could reach it at all.
+could reach it at all (and serves plain HTTP, since nothing leaves the machine).
 
 Uploads are kept in `cache/uploads` and swept when they are over a day old
 (anything still open in a session is never swept). An upload is refused up front
@@ -586,7 +653,10 @@ videotrim/
   security/fs_boundary.py   read / create-only policy, the exclusive-create
                             gateway, the name sanitizer, zone separation
   security/auth.py          Argon2id credentials, sessions, CSRF
-  security/network.py       IP normalisation; host-admin vs browse capability
+  security/network.py       IP normalisation; host-admin vs browse capability;
+                            this machine's own addresses
+  security/tls.py           HTTPS: the managed certificate in data/tls/, or
+                            a supplied one; what each page says about it
   security/write_policy.py  per-IP write authorization
   security/middleware.py    the default-deny guard around the whole app
   config/store.py           data/app.db — credentials, settings, IP history,
