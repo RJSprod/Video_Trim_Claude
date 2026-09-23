@@ -54,7 +54,14 @@
     fwd5: "<b>5</b>" + svg('<path d="M9 5.5l4.5 4.5L9 14.5M4 5.5L8.5 10 4 14.5"/>', true),
     repeat: svg('<path d="M4.2 8.6a6 6 0 0 1 10-2.6l1.6 1.6M15.8 11.4a6 6 0 0 1-10 2.6L4.2 12.4"/>' +
       '<path d="M16.4 3.6v4h-4M3.6 16.4v-4h4"/>', true),
-    clip: svg('<path d="M10 3.4v7.8M6.6 8.4L10 11.8l3.4-3.4M4.2 13.6v2.2a1 1 0 0 0 1 1h9.6a1 1 0 0 0 1-1v-2.2"/>', true),
+    /* The two A-B saves share a download arrow at the lower right, so they read
+     * as a pair; what sits beside it says which one: a frame, or a note. */
+    saveVideo: svg('<rect x="2.2" y="3.4" width="11.2" height="9.2" rx="1.6"/>' +
+      '<path d="M6.6 5.9v4.2L10 8z"/>' +
+      '<path d="M16 9.4v7.2M13.6 14.2l2.4 2.4 2.4-2.4"/>', true),
+    saveAudio: svg('<path d="M5.8 13V5.1l5.6-1.5v7.9"/>' +
+      '<circle cx="4.1" cy="13" r="1.8"/><circle cx="9.7" cy="11.5" r="1.8"/>' +
+      '<path d="M16 9.4v7.2M13.6 14.2l2.4 2.4 2.4-2.4"/>', true),
     camera: svg('<path d="M3.2 7.4A1.6 1.6 0 0 1 4.8 5.8h1.6l1-1.6h5.2l1 1.6h1.6a1.6 1.6 0 0 1 1.6 1.6v6.4a1.6 1.6 0 0 1-1.6 1.6H4.8a1.6 1.6 0 0 1-1.6-1.6z"/>' +
       '<circle cx="10" cy="10.6" r="2.8"/>', true),
     volumeOn: svg('<path d="M4 7.6h2.4L9.8 4.8v10.4L6.4 12.4H4z"/>' +
@@ -462,6 +469,7 @@
     setIcon(dom.btn.mute, dom.video.muted ? "volumeOff" : "volumeOn");
     dom.btn.marker.setAttribute("data-stage", hasLoop() ? "2" : (st.a !== null ? "1" : "0"));
     dom.btn.clip.disabled = !hasLoop() || !!st.busy || !config.ffmpeg;
+    dom.btn.audio.disabled = dom.btn.clip.disabled;
     dom.btn.screenshot.disabled = !hasMedia() || !config.ffmpeg;
 
     ["stop", "back5", "fwd5", "prevFrame", "nextFrame", "marker", "repeat"].forEach(function (key) {
@@ -1271,7 +1279,21 @@
     tick();
   }
 
-  function saveClip() {
+  /* The two things an A-B range can be saved as. Both are cut on the host from
+   * the original file, with the same markers; only the route and the words
+   * differ. Audio ignores the gear menu, which is all about the picture. */
+  var EXPORTS = {
+    video: { route: "/vt/api/clip", doing: "Exporting clip", noun: "the clip",
+             options: true },
+    audio: { route: "/vt/api/audio", doing: "Exporting audio", noun: "the audio",
+             options: false }
+  };
+
+  function saveClip() { exportRange("video"); }
+  function saveAudio() { exportRange("audio"); }
+
+  function exportRange(kind) {
+    var spec = EXPORTS[kind];
     if (!hasMedia()) return;
     if (!hasLoop()) {
       toast("Set an A-B loop first.", 2400);
@@ -1282,37 +1304,34 @@
       return;
     }
     if (!config.ffmpeg) {
-      fail("ffmpeg was not found, so clips cannot be cut. Install imageio-ffmpeg in the venv and restart.");
+      fail("ffmpeg was not found, so nothing can be cut. Install imageio-ffmpeg in the venv and restart.");
       return;
     }
 
     /* Cutting is the one thing the browser cannot do at full quality, so this
      * is where a local file finally gets sent — and only the first time, and
-     * only because you asked for a clip. */
+     * only because you asked for a cut. */
     var a = Math.round(st.a);
     var b = Math.round(st.b);
 
     if (st.media.local && !st.media.token) {
       toast("Sending the video so it can be cut…", 0);
     } else {
-      toast("Exporting clip…  0%", 0);
+      toast(spec.doing + "…  0%", 0);
     }
 
     ensureOnHost()
       .then(function () {
-        toast("Exporting clip…  0%", 0);
-        return postJson("/vt/api/clip", {
-          token: st.media.token,
-          a_ms: a,
-          b_ms: b,
-          options: optionsPayload()
-        });
+        toast(spec.doing + "…  0%", 0);
+        var body = { token: st.media.token, a_ms: a, b_ms: b };
+        if (spec.options) body.options = optionsPayload();
+        return postJson(spec.route, body);
       })
       .then(function (job) {
         st.busy = job.id;
         render();
-        pollJob(job.id, "Exporting clip", function (done) {
-          reportOutcome(done, "the clip");
+        pollJob(job.id, spec.doing, function (done) {
+          reportOutcome(done, spec.noun);
         });
       })
       .catch(function (err) { fail(err.message); });
@@ -1663,6 +1682,9 @@
       case "c":
         saveClip();
         break;
+      case "a":
+        saveAudio();
+        break;
       case "f":
       case "F11":
         toggleFullscreen();
@@ -1707,6 +1729,7 @@
     },
     marker: cycleMarker,
     clip: saveClip,
+    audio: saveAudio,
     screenshot: saveScreenshot,
     mute: function () { dom.video.muted = !dom.video.muted; render(); },
     fullscreen: toggleFullscreen,
@@ -1936,7 +1959,7 @@
     // Scoped to the panel on purpose: "browse" also names the placeholder link,
     // and an unscoped query would hand back that one instead of the button.
     dom.btn = {};
-    ["play", "stop", "back5", "fwd5", "repeat", "marker", "clip", "screenshot",
+    ["play", "stop", "back5", "fwd5", "repeat", "marker", "clip", "audio", "screenshot",
      "mute", "fullscreen", "browse", "options"].forEach(function (name) {
       dom.btn[name] = dom.panel.querySelector('[data-vt="' + name + '"]');
     });

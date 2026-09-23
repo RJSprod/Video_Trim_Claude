@@ -19,7 +19,7 @@ from videotrim.ffmpeg_tools import PROTOCOL_WHITELIST, FFmpegError, UntrustedExe
 
 
 BUILDERS = ["clip_command", "frame_command", "proxy_command", "poster_command",
-            "clip_command_with_options"]
+            "clip_command_with_options", "audio_command"]
 
 
 def _build(name, ffmpeg, source, target):
@@ -35,6 +35,8 @@ def _build(name, ffmpeg, source, target):
         )
         return ffmpeg_tools.clip_command(ffmpeg, source, target, 1000, 5000,
                                          options=options)
+    if name == "audio_command":
+        return ffmpeg_tools.audio_command(ffmpeg, source, target, 1000, 5000)
     if name == "frame_command":
         return ffmpeg_tools.frame_command(ffmpeg, source, target, 1000)
     if name == "poster_command":

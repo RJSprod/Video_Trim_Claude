@@ -603,3 +603,98 @@ def test_a_real_https_listener_end_to_end(https_server):
                       timeout=5) as plain:
         with pytest.raises(httpx.HTTPError):
             plain.get("/healthz")
+
+
+# --- saving audio only ---------------------------------------------------------
+def _open_for(app, session, path):
+    """Register ``path`` as this client's open video, as /vt/api/open would."""
+    state = app.state.video_trim
+    signed = state.auth.resolve(session.cookies.get("vt_session"))
+    return state.registry.add(path, kind="source", session_id=signed.id,
+                              capability="host_browse")
+
+
+@pytest.fixture
+def audio_ready(app, monkeypatch, host_tree):
+    """ffmpeg present, the source has sound, and jobs recorded instead of run."""
+    from videotrim import ffmpeg_tools
+
+    state = app.state.video_trim
+    monkeypatch.setattr(state, "ffmpeg", "ffmpeg")
+    monkeypatch.setattr(ffmpeg_tools, "has_audio", lambda ffmpeg, path: True)
+    started = []
+
+    class Job:
+        def snapshot(self):
+            return {"id": "job1", "state": "running", "percent": 0}
+
+    def start(kind, label, total_ms, command, target, **kwargs):
+        started.append({"kind": kind, "label": label, "command": command, "target": target})
+        return Job()
+
+    monkeypatch.setattr(state.jobs, "start", start)
+    return started
+
+
+def test_saving_audio_starts_an_mp3_export_of_the_range(app, audio_ready, host_tree):
+    with client(app) as host:
+        csrf = sign_in(host)
+        token = _open_for(app, host, host_tree / "existing.mp4")
+        response = host.post("/vt/api/audio", json={"token": token, "a_ms": 2000, "b_ms": 7000},
+                             headers={"X-VT-CSRF": csrf})
+    assert response.status_code == 200, response.text
+    job, = audio_ready
+    assert job["kind"] == "audio"
+    assert "existing_audio_00m02.0s_to_00m07.0s.mp3" in job["label"]
+    assert job["target"].name == "audio.mp3"
+    assert "libmp3lame" in job["command"] and "192k" in job["command"]
+
+
+def test_a_video_without_sound_is_refused_plainly(app, audio_ready, host_tree, monkeypatch):
+    from videotrim import ffmpeg_tools
+
+    monkeypatch.setattr(ffmpeg_tools, "has_audio", lambda ffmpeg, path: False)
+    with client(app) as host:
+        csrf = sign_in(host)
+        token = _open_for(app, host, host_tree / "existing.mp4")
+        response = host.post("/vt/api/audio", json={"token": token, "a_ms": 0, "b_ms": 3000},
+                             headers={"X-VT-CSRF": csrf})
+    assert response.status_code == 422
+    assert "no sound" in response.json()["detail"]
+    assert not audio_ready
+
+
+def test_audio_and_video_exports_never_run_at_once(app, audio_ready, host_tree, monkeypatch):
+    state = app.state.video_trim
+    with client(app) as host:
+        csrf = sign_in(host)
+        token = _open_for(app, host, host_tree / "existing.mp4")
+        body = {"token": token, "a_ms": 0, "b_ms": 3000}
+        monkeypatch.setattr(state.jobs, "active",
+                            lambda kind=None: ["busy"] if kind == "clip" else [])
+        assert host.post("/vt/api/audio", json=body,
+                         headers={"X-VT-CSRF": csrf}).status_code == 409
+        monkeypatch.setattr(state.jobs, "active",
+                            lambda kind=None: ["busy"] if kind == "audio" else [])
+        assert host.post("/vt/api/clip", json=body,
+                         headers={"X-VT-CSRF": csrf}).status_code == 409
+    assert not audio_ready
+
+
+def test_a_new_device_cannot_save_audio_either(app, audio_ready, host_tree):
+    with client(app, host="192.168.1.77") as phone:
+        csrf = sign_in(phone)
+        token = _open_for(app, phone, host_tree / "existing.mp4")
+        response = phone.post("/vt/api/audio", json={"token": token, "a_ms": 0, "b_ms": 3000},
+                              headers={"X-VT-CSRF": csrf})
+    assert response.status_code == 403
+    assert not audio_ready
+
+
+def test_audio_needs_the_csrf_header(app, audio_ready, host_tree):
+    with client(app) as host:
+        sign_in(host)
+        token = _open_for(app, host, host_tree / "existing.mp4")
+        response = host.post("/vt/api/audio", json={"token": token, "a_ms": 0, "b_ms": 3000})
+    assert response.status_code == 403
+    assert not audio_ready

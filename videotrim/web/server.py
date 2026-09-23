@@ -34,7 +34,7 @@ from .. import encoding, ffmpeg_tools
 from ..config.settings import SettingsService
 from ..config.store import CommitJournal, Store
 from ..ffmpeg_tools import FFmpegError
-from ..naming import clip_name, frame_name
+from ..naming import audio_name, clip_name, frame_name
 from ..paths import desktop_dir, sanitize
 from ..security import fs_boundary, tls
 from ..security.auth import COOKIE_NAME, AuthError, AuthService, LoginThrottle
@@ -261,6 +261,11 @@ class VideoTrimWeb:
         if host_local:
             payload["path"] = str(path)
         return payload
+
+
+def _export_running(state):
+    """One A-B export at a time, whichever kind: they share ffmpeg and the disk."""
+    return bool(state.jobs.active("clip") or state.jobs.active("audio"))
 
 
 # --- shell routes ------------------------------------------------------------
@@ -756,7 +761,7 @@ def _register_routes(app, state):
         b_ms = int(float(body.get("b_ms")))
         if b_ms - a_ms < 120:
             raise HTTPException(status_code=400, detail="That A-B range is too short to export.")
-        if state.jobs.active("clip"):
+        if _export_running(state):
             raise HTTPException(status_code=409, detail="An export is already running.")
 
         # What the gear menu chose. Vetted against the source's *probed*
@@ -795,6 +800,63 @@ def _register_routes(app, state):
             b_ms - a_ms,
             ffmpeg_tools.clip_command(ffmpeg, source, staged, a_ms, b_ms,
                                       options=options),
+            staged,
+            on_success=publish,
+            owner_session=session.id,
+            owner_ip=session.client_ip,
+        )
+        return job.snapshot()
+
+    @app.post("/vt/api/audio")
+    async def audio(request: Request):
+        """The A-B range as audio only, an MP3. Cut from the original, like a clip."""
+        session = state.require_session(request)
+        state.require_write(request, session)
+        ffmpeg = state.require_ffmpeg()
+
+        body = await read_json(request)
+        source = state.registry.path_for(body.get("token"), session.id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="That video is no longer open.")
+
+        a_ms = int(float(body.get("a_ms")))
+        b_ms = int(float(body.get("b_ms")))
+        if b_ms - a_ms < 120:
+            raise HTTPException(status_code=400, detail="That A-B range is too short to export.")
+        if _export_running(state):
+            raise HTTPException(status_code=409, detail="An export is already running.")
+        if not ffmpeg_tools.has_audio(ffmpeg, source):
+            raise HTTPException(status_code=422, detail="This video has no sound to save.")
+
+        # Rendered into the app's own cache and published through the same
+        # exclusive-create gateway as a clip; only the file type differs.
+        job_id = state.output.new_job_id()
+        staging = state.output.staging_dir("exports", job_id)
+        staged = staging / "audio.mp3"
+        desired = audio_name(source, a_ms, b_ms)
+        host_local = state.is_host_admin(request)
+        authorize = state.write_policy.authorizer(request, session)
+
+        def publish(finished):
+            try:
+                outcome = state.output.publish(
+                    finished.target,
+                    desired,
+                    CollisionPolicy.UNIQUE_NEW_NAME,
+                    authorize=authorize,
+                    job_id=job_id,
+                    session=session,
+                    host_local=host_local,
+                )
+            finally:
+                state.output.discard_staging("exports", job_id)
+            return outcome.as_dict()
+
+        job = state.jobs.start(
+            "audio",
+            f"Exporting audio → {desired}",
+            b_ms - a_ms,
+            ffmpeg_tools.audio_command(ffmpeg, source, staged, a_ms, b_ms),
             staged,
             on_success=publish,
             owner_session=session.id,

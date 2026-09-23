@@ -343,6 +343,60 @@ def clip_command(ffmpeg, source, target, a_ms, b_ms, progress=True, options=None
     return command + [str(target)]
 
 
+# Audio-only exports: always stereo, always a constant 192 kbps at 48 kHz. The
+# bitrate is fixed rather than VBR because VBR drops far below 128 kbps on quiet
+# or simple material, and a guaranteed floor was asked for; 192 kbps is the
+# usual "sounds like the source" point for stereo MP3, about 1.4 MB a minute.
+# 48 kHz is what nearly every video's audio already uses, so most exports are
+# not resampled at all.
+MP3_BITRATE_KBPS = 192
+MP3_CHANNELS = 2
+MP3_SAMPLE_RATE = 48000
+
+_AUDIO_STREAM_RE = re.compile(r"Stream #\d+:\d+.*?: Audio: ")
+
+
+def has_audio(ffmpeg, path):
+    """True when ffmpeg sees an audio stream in ``path``.
+
+    Asked before an audio export starts, so a silent video gets a plain answer
+    instead of a job that fails halfway with ffmpeg's own wording.
+    """
+    result = _run(ffmpeg_probe_command(ffmpeg, path))
+    return bool(_AUDIO_STREAM_RE.search(f"{result.stderr}\n{result.stdout}"))
+
+
+def audio_command(ffmpeg, source, target, a_ms, b_ms, progress=True):
+    """The A-B range as audio only: a stereo MP3 at a constant 192 kbps.
+
+    Same seek-then-decode cut as clip_command, so the audio starts exactly on
+    marker A. The first audio track is used. A mono track is played on both
+    channels and 5.1 is folded down, so the result is always stereo.
+    """
+    duration_ms = max(1, int(b_ms) - int(a_ms))
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel", "error",
+        "-n",
+        *PROTOCOL_WHITELIST,
+        "-ss", f"{int(a_ms) / 1000.0:.3f}",
+        "-i", str(source),
+        "-t", f"{duration_ms / 1000.0:.3f}",
+        "-map", "0:a:0",
+        "-vn", "-sn", "-dn",
+        "-ac", str(MP3_CHANNELS),
+        "-ar", str(MP3_SAMPLE_RATE),
+        "-c:a", "libmp3lame",
+        "-b:a", f"{MP3_BITRATE_KBPS}k",
+        "-id3v2_version", "3",
+    ]
+    if progress:
+        command += ["-progress", "pipe:1", "-nostats"]
+    return command + [str(target)]
+
+
 def frame_command(ffmpeg, source, target, position_ms):
     """A single full-resolution still at ``position_ms``.
 

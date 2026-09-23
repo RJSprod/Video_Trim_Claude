@@ -18,3 +18,11 @@ def clip_name(source_path, a_ms, b_ms):
         f"{stem}_clip_{fmt_time_filename(a_ms)}"
         f"_to_{fmt_time_filename(b_ms)}.mp4"
     )
+
+
+def audio_name(source_path, a_ms, b_ms):
+    stem = sanitize(Path(source_path).stem) if source_path else "audio"
+    return (
+        f"{stem}_audio_{fmt_time_filename(a_ms)}"
+        f"_to_{fmt_time_filename(b_ms)}.mp3"
+    )
