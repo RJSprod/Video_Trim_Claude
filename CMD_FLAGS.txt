@@ -5,12 +5,17 @@
 # deliberately does not read credentials from it. Set the login with:
 #     python one_click.py --change-auth
 #
-# You should not need anything in here. With no flags the app serves on port
-# 7862 on every interface, so it is reachable both at http://127.0.0.1:7862 on
-# this machine and at http://<this-machine's-address>:7862 from your phone or
+# You should not need anything in here. With no flags the app serves HTTPS on
+# port 7862 on every interface, so it is reachable both at https://127.0.0.1:7862
+# on this machine and at https://<this-machine's-address>:7862 from your phone or
 # another computer on the same network — the launcher prints both. That port is
 # reserved for it: if something else already has 7862 the launcher stops with an
 # explanation rather than quietly moving to another one.
+#
+# The certificate is one Video Trim generates itself (in data/tls/), so each
+# browser warns once before connecting; the launcher prints its fingerprint so
+# you can check you are accepting the right one. Nothing is installed into any
+# device's trust store.
 #
 # Everyone who opens it has to sign in. A device on another address can sign in
 # but cannot make this machine write anything until you allow that address in
@@ -20,17 +25,26 @@
 # Available flags:
 #
 #   --local-only             the opposite of the default: bind 127.0.0.1 only,
-#                            so nothing outside this machine can reach the app
+#                            so nothing outside this machine can reach the app.
+#                            Served over plain HTTP, since nothing leaves it.
 #   --listen-port 7862       serve on a different port
 #   --listen-host 192.168.1.5   bind one specific interface
 #   --output-dir <folder>    where saved clips and stills are created. Must
 #                            already exist and must sit outside this
 #                            installation. Stored, so it is only needed once —
 #                            Settings can change it later.
+#   --http                   serve plain, UNENCRYPTED HTTP instead of HTTPS.
+#                            Anyone who can capture traffic on your network can
+#                            then read the session cookie and your media.
+#   --tls-keyfile <key.pem>  use your own certificate instead of the generated
+#   --tls-certfile <cert.pem>   one. Both together; PEM; only ever read. The key
+#                            must not have a passphrase — and never put a
+#                            passphrase, or the key itself, in this file.
 #   --share                  also expose a temporary public gradio.live URL.
 #                            Host Settings are hidden while a tunnel is up,
 #                            because tunnelled traffic cannot be told apart
-#                            from this machine's own.
+#                            from this machine's own. The tunnel can only reach
+#                            plain HTTP, so combine it with --local-only.
 #   --no-browser             do not open a browser window on start
 #   --any-port               use the next free port instead of stopping when
 #                            the chosen one is busy
