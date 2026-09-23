@@ -46,13 +46,15 @@ class LiveClient:
     application with a different ``client`` tuple.
     """
 
-    def __init__(self, app, host="127.0.0.1"):
+    def __init__(self, app, host="127.0.0.1", scheme="http"):
         import asyncio
 
         self._loop = asyncio.new_event_loop()
         self._client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=(host, 51234)),
-            base_url="http://testserver",
+            # The scheme reaches the app as the request's own, exactly as
+            # Uvicorn reports it for a TLS or a plain connection.
+            base_url=f"{scheme}://testserver",
             follow_redirects=False,
         )
 
@@ -80,9 +82,9 @@ class LiveClient:
         self.close()
 
 
-def client(app, host="127.0.0.1"):
+def client(app, host="127.0.0.1", scheme="http"):
     """A client whose requests appear to come from ``host``."""
-    return LiveClient(app, host)
+    return LiveClient(app, host, scheme)
 
 
 def sign_in(session):
@@ -455,3 +457,149 @@ def test_remote_client_cannot_open_host_paths(app, host_tree):
         browse = phone.get("/vt/api/browse")
     assert response.status_code == 403
     assert browse.status_code == 403
+
+
+# --- HTTPS -------------------------------------------------------------------
+def _cookie_flags(response):
+    """{cookie name: [lower-cased attributes]} from a response's Set-Cookie headers."""
+    flags = {}
+    for header in response.headers.get_list("set-cookie"):
+        name = header.split("=", 1)[0].strip()
+        flags[name] = [part.strip().lower() for part in header.split(";")[1:]]
+    return flags
+
+
+def test_login_over_https_sets_both_cookies_secure(app):
+    with client(app, scheme="https") as session:
+        response = session.post("/api/login",
+                                json={"username": USERNAME, "password": PASSWORD})
+        assert response.status_code == 200
+        assert session.get("/vt/api/capabilities").status_code == 200
+    flags = _cookie_flags(response)
+    assert "secure" in flags["vt_session"] and "httponly" in flags["vt_session"]
+    assert "secure" in flags["vt_csrf"]
+
+
+def test_login_over_plain_http_still_works_without_secure(app):
+    # --http must stay a working mode: a Secure cookie over HTTP is never sent
+    # back, which would make signing in impossible.
+    with client(app) as session:
+        response = session.post("/api/login",
+                                json={"username": USERNAME, "password": PASSWORD})
+        assert session.get("/vt/api/capabilities").status_code == 200
+    flags = _cookie_flags(response)
+    assert "secure" not in flags["vt_session"]
+    assert "secure" not in flags["vt_csrf"]
+
+
+def test_pages_describe_the_connection_they_arrived_on(app):
+    import html
+
+    from videotrim.security import tls
+    from videotrim.security.auth import TRANSPORT_WARNING
+
+    state = app.state.video_trim
+    state.transport = tls.Transport("https", tls.MANAGED)
+    with client(app, scheme="https") as session:
+        login = session.get("/login").text
+        sign_in(session)
+        note = session.get("/vt/api/capabilities").json()["transport_note"]
+        settings = session.get("/settings").text
+    assert html.escape(tls.MANAGED_HTTPS_NOTE) in login
+    assert html.escape(tls.MANAGED_HTTPS_NOTE) in settings
+    assert note == tls.MANAGED_HTTPS_NOTE
+    for page in (login, settings):
+        assert html.escape(TRANSPORT_WARNING) not in page, "HTTPS page told to use HTTPS"
+
+    state.transport = tls.Transport("http", tls.LOOPBACK)
+    with client(app) as session:
+        assert html.escape(tls.LOOPBACK_NOTE) in session.get("/login").text
+
+    state.transport = tls.Transport("http", tls.PLAINTEXT)
+    with client(app) as session:
+        assert html.escape(TRANSPORT_WARNING) in session.get("/login").text
+
+
+def test_the_private_key_and_credentials_cannot_be_opened_by_path(app, fake_root, tmp_path):
+    import os
+
+    from videotrim.security import tls
+
+    material = tls.ensure_managed_tls("0.0.0.0", primary="192.168.1.50",
+                                      hostname="host", addresses=[])
+    targets = [material.key_path, material.cert_path, fake_root / "data" / "app.db"]
+    if os.name == "posix":
+        disguised = tmp_path / "holiday.mp4"
+        disguised.symlink_to(material.key_path)
+        targets.append(disguised)
+
+    # The host itself is the most privileged browser there is.
+    with client(app) as host:
+        csrf = sign_in(host)
+        for target in targets:
+            response = host.post("/vt/api/open", json={"path": str(target)},
+                                 headers={"X-VT-CSRF": csrf})
+            assert response.status_code == 404, target
+            assert "private data" in response.json()["detail"]
+            assert "token" not in response.json()
+            assert "PRIVATE KEY" not in response.text
+
+
+@pytest.fixture
+def https_server(app, fake_root):
+    """The real app behind a real Uvicorn with the managed certificate, on loopback."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    from videotrim.security import tls
+
+    material = tls.ensure_managed_tls("127.0.0.1")
+    transport = tls.Transport("https", tls.MANAGED, material)
+    app.state.video_trim.transport = transport
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    # Lifespan off, as with the in-process clients above: these requests never
+    # touch Gradio's queue, and its startup hooks are not what is under test.
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
+                            access_log=False, lifespan="off", **transport.uvicorn_options())
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 30
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "HTTPS server did not start"
+        time.sleep(0.05)
+    yield port, material
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+def test_a_real_https_listener_end_to_end(https_server):
+    import ssl
+
+    from videotrim.security import tls
+
+    port, material = https_server
+    # Trust exactly the generated certificate: nothing is disabled, and nothing
+    # process-wide changes.
+    trust = ssl.create_default_context(cafile=str(material.cert_path))
+    with httpx.Client(base_url=f"https://127.0.0.1:{port}", verify=trust,
+                      trust_env=False, timeout=15) as browser:
+        assert browser.get("/healthz").json() == {"status": "ok"}
+        login = browser.post("/api/login", json={"username": USERNAME, "password": PASSWORD})
+        assert login.status_code == 200
+        flags = _cookie_flags(login)
+        assert "secure" in flags["vt_session"] and "secure" in flags["vt_csrf"]
+        capabilities = browser.get("/vt/api/capabilities")
+        assert capabilities.status_code == 200
+        assert capabilities.json()["transport_note"] == tls.MANAGED_HTTPS_NOTE
+
+    # Plain HTTP to the same port is not an application session of any kind.
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                      timeout=5) as plain:
+        with pytest.raises(httpx.HTTPError):
+            plain.get("/healthz")
