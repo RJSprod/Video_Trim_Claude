@@ -127,3 +127,27 @@ file = "webui.py"
 symbol = "os.chmod"
 category = "internal"
 why = "Re-applies 0700/0600 to data/ and data/app.db at startup."
+
+[[entry]]
+file = "videotrim/security/tls.py"
+symbol = "os.open"
+category = "internal"
+why = "Opens (creating if needed) data/tls/.lock, which serializes checking and replacing the managed certificate between concurrent launches. The directory comes from ensure_internal_dir."
+
+[[entry]]
+file = "videotrim/security/tls.py"
+symbol = "handle.write"
+category = "internal"
+why = "Writes a freshly generated key or certificate into a tempfile.mkstemp() file (0600) inside data/tls/, which ensure_internal_dir proved is inside the install root."
+
+[[entry]]
+file = "videotrim/security/tls.py"
+symbol = "os.replace"
+category = "internal"
+why = "Moves a staged file over data/tls/videotrim.key or videotrim.crt in one step. Only the managed pair: files passed with --tls-keyfile/--tls-certfile are only ever read."
+
+[[entry]]
+file = "videotrim/security/tls.py"
+symbol = "os.chmod"
+category = "internal"
+why = "0600 on data/tls/videotrim.key (re-applied every start) and 0644 on the staged certificate. Never applied to files passed with --tls-keyfile/--tls-certfile."

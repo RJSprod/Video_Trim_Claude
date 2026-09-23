@@ -124,8 +124,17 @@ def validate_external_read(path):
     and callers open it ``"rb"``. Directories, devices, fifos and sockets are
     refused because handing one to ffmpeg is a way to make it block forever or
     read something nobody chose.
+
+    Anything inside data/ is refused as well. That is where the credential
+    database and the HTTPS private key live, and neither may ever be handed to
+    a browser — not even by the accident of a probe that happens to accept it.
     """
     target = _resolved(path)
+    private = _resolved(DATA_DIR)
+    if target == private or private in target.parents:
+        raise ExternalReadError(
+            f"{target.name} is part of Video Trim's private data and cannot be opened."
+        )
     try:
         info = target.lstat()
     except OSError as exc:
